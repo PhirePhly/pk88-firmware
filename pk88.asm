@@ -11,7 +11,16 @@ SCC_A_CTRL: equ 0f0h ; Z8530 channel A control/status (Bell 202/AX.25)
 SCC_A_DATA: equ 0f1h ; Z8530 channel A data
 SCC_B_CTRL: equ 0f2h ; Z8530 channel B control/status (terminal serial)
 SCC_B_DATA: equ 0f3h ; Z8530 channel B data
-BOARD_CTRL: equ 0f4h ; board control latch; exact bit assignments unknown
+LED_LATCH:  equ 0f4h ; Octal D-latch driving front-panel indicator LEDs (active-low)
+; LED_LATCH bit assignments (LSB to MSB, active-low):
+;   bit 0: CONV  - converse mode / packet data activity
+;   bit 1: TRANS - transmit / packet TX
+;   bit 2: CMD   - command mode active
+;   bit 3: SEND  - send buffer / TX data pending
+;   bit 4: DCD   - data carrier detect (modem)
+;   bit 5: STA   - station / link status
+;   bit 6: CON   - connect / connected state
+;   bit 7: MULT  - multiple connections / multi-link
 
 	org	00000h
 
@@ -1380,9 +1389,9 @@ l0654h:
 	and 004h		;066e
 	jr z,l0654h		;0670
 l0672h:
-	di			;0672
-	ld a,07fh		;0673
-	out (BOARD_CTRL),a		;0675
+		di			;0672
+		ld a,07fh		;0673 ; 01111111b: all LEDs off except MULT (active-low)
+		out (LED_LATCH),a		;0675 ; initialize LED latch
 	call block_0017_end		;0677
 l067ah:
 	ld hl,0ff00h		;067a
@@ -7821,7 +7830,7 @@ l250ch:
 	add a,a			;2516
 	and 010h		;2517
 	or c			;2519
-	ld c,a			;251a
+	ld c,a			;251a ; C = initial LED status bits
 	push iy		;251b
 	ld a,(0889dh)		;251d
 	call select_channel_context		;2520
@@ -7835,13 +7844,13 @@ l2530h:
 	ld a,(iy+044h)		;2530
 	cp 002h		;2533
 	jr c,l2539h		;2535
-	set 6,c		;2537
+	set 6,c		;2537 ; CON (bit 6)
 l2539h:
 	call sub_2595h		;2539
 	ld a,(iy+058h)		;253c
 	cp (iy+040h)		;253f
 	jr z,l2546h		;2542
-	set 5,c		;2544
+	set 5,c		;2544 ; STA (bit 5)
 l2546h:
 	call sub_25a2h		;2546
 	jr c,l2550h		;2549
@@ -7866,28 +7875,28 @@ l2560h:
 	cp 002h		;2565
 l2567h:
 	jr c,l256bh		;2567
-	set 7,c		;2569
+	set 7,c		;2569 ; MULT (bit 7)
 l256bh:
 	ld a,c			;256b
 	pop iy		;256c
-	cpl			;256e
-	out (BOARD_CTRL),a		;256f
+	cpl			;256e ; active-low outputs
+	out (LED_LATCH),a		;256f ; update front-panel LEDs
 	ret			;2571
 sub_2572h:
 	ld hl,0800ch		;2572
 	bit 1,(hl)		;2575
 	res 1,(hl)		;2577
 	jr z,l257dh		;2579
-	set 5,c		;257b
+	set 5,c		;257b ; STA (bit 5)
 l257dh:
 	bit 2,(hl)		;257d
 	res 2,(hl)		;257f
 	ret z			;2581
-	set 6,c		;2582
+	set 6,c		;2582 ; CON (bit 6)
 	ret			;2584
 sub_2585h:
 	ret z			;2585
-	set 3,c		;2586
+	set 3,c		;2586 ; SEND (bit 3)
 	ret			;2588
 sub_2589h:
 	ld a,(08002h)		;2589
@@ -7903,7 +7912,7 @@ sub_2595h:
 	ret z			;259a
 	call sub_2589h		;259b
 	ret c			;259e
-	set 5,c		;259f
+	set 5,c		;259f ; STA (bit 5)
 	ret			;25a1
 sub_25a2h:
 	ld hl,(088cfh)		;25a2
