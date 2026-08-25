@@ -18,6 +18,7 @@ BOARD_CTRL: equ 0f4h ; board control latch; exact bit assignments unknown
 
 ; BLOCK 'block_0000' (start 0x0000 end 0x0006)
 block_0000_start:
+; Z80 reset entry; disables interrupts and jumps to reset_and_main_loop.
 reset_vector:
 	nop			;0000
 l0001h:
@@ -25,7 +26,7 @@ l0001h:
 l0002h:
 	di			;0002
 l0003h:
-	jp l0521h		;0003
+	jp reset_and_main_loop		;0003
 block_0000_end:
 
 ; BLOCK 'block_0001' (start 0x0006 end 0x0008)
@@ -37,7 +38,8 @@ block_0001_end:
 
 ; BLOCK 'block_0002' (start 0x0008 end 0x0022)
 block_0002_start:
-rst_08:
+; No RST 08 callers; bytes do not form a safe standalone service.
+rst08_unused_data:
 	inc hl			;0008
 l0009h:
 	ld c,a			;0009
@@ -49,8 +51,8 @@ l000eh:
 	nop			;000e
 l000fh:
 	rla			;000f
-l0010h:
-rst_10:
+test_status_80d5_bit0:
+; Preserves HL and returns the state of SRAM 0x80d5 bit 0 in Z.
 	push hl			;0010
 l0011h:
 	ld hl,080d5h		;0011
@@ -58,15 +60,15 @@ l0011h:
 	pop hl			;0016
 l0017h:
 	ret			;0017
-l0018h:
-rst_18:
+test_combined_io_status:
+; Tests 0x80b2 bit 2 and shared 0x80d6/0x80d5 status paths.
 	push hl			;0018
 	ld hl,080b2h		;0019
 l001ch:
 	bit 2,(hl)		;001c
 	jr nz,l0011h		;001e
-l0020h:
-rst_20:
+rst20_unused_unsafe:
+; No RST 20 callers; entry can reach POP HL without a matching push.
 	jr l0029h		;0020
 block_0002_end:
 
@@ -82,14 +84,15 @@ block_0003_end:
 
 ; BLOCK 'block_0004' (start 0x0028 end 0x0032)
 block_0004_start:
-rst_28:
+; NZ only when SRAM 0x80d6 bit 0 and 0x80d5 bit 0 are both set.
+test_status_80d6_and_80d5:
 	push hl			;0028
 l0029h:
 	ld hl,080d6h		;0029
 	bit 0,(hl)		;002c
 	jr nz,l0011h		;002e
-l0030h:
-rst_30:
+shared_pop_hl_return:
+; Shared epilogue; no direct RST 30 callers found.
 	pop hl			;0030
 	ret			;0031
 block_0004_end:
@@ -109,14 +112,16 @@ block_0005_end:
 
 ; BLOCK 'block_0006' (start 0x0038 end 0x0064)
 block_0006_start:
-rst_38_irq:
+; Maskable IM1 interrupt vector; jumps to reset.
+im1_reset_vector:
 	jp block_0000_start		;0038
-sub_003bh:
+service_deferred_queue:
+; Services descriptor 0x8fd8 and sets deferred-work flag 0x8013 bit 0.
 	ld hl,08013h		;003b
 	set 0,(hl)		;003e
 l0040h:
 	ld hl,08fd8h		;0040
-	call sub_18ddh		;0043
+	call list_is_empty		;0043
 l0046h:
 	jr z,l004eh		;0046
 	ld a,(088d0h)		;0048
@@ -124,11 +129,12 @@ l0046h:
 	jr nz,l0054h		;004c
 l004eh:
 	ld hl,08fd8h		;004e
-	call sub_179ch		;0051
+	call queue_ensure_block		;0051
 l0054h:
 	ei			;0054
 	ret			;0055
-sub_0056h:
+translate_escape_character:
+; Maps ESC to '$' when configuration bit 0x80ab.7 is set.
 	cp 01bh		;0056
 	ret nz			;0058
 	push hl			;0059
@@ -149,9 +155,11 @@ block_0007_end:
 
 ; BLOCK 'block_0008' (start 0x0066 end 0x009b)
 block_0008_start:
-nmi_vector:
+; NMI vector; jumps to reset.
+nmi_reset_vector:
 	jp block_0000_start		;0066
-sub_0069h:
+initialize_scrambler_state:
+; Tentative: initializes shift/scrambler state using alternate registers and table data.
 	di			;0069
 	ld a,0ffh		;006a
 	ld (088d5h),a		;006c
@@ -639,37 +647,43 @@ block_0011_end:
 
 ; BLOCK 'block_0012' (start 0x0264 end 0x02a0)
 block_0012_start:
+; Tests 0x80b0 bit 7, otherwise tail-calls the 0x80d5 bit-0 predicate.
+test_output_status:
 	push hl			;0264
 	ld hl,080b0h		;0265
 	bit 7,(hl)		;0268
 	pop hl			;026a
 	ret nz			;026b
-	jp l0010h		;026c
-sub_026fh:
-	call sub_003bh		;026f
+	jp test_status_80d5_bit0		;026c
+prepare_and_queue_output:
+; Prepares active-channel output and enters character output handling.
+	call service_deferred_queue		;026f
 	ld a,(088fah)		;0272
-	call sub_027dh		;0275
+	call test_nonzero_and_output_status		;0275
 	ld a,(iy+065h)		;0278
 	or 050h		;027b
-sub_027dh:
+test_nonzero_and_output_status:
+; Returns Z for A=0; otherwise returns status from test_status_80d5_bit0.
 	and a			;027d
 	rst 10h			;027e
 	ret z			;027f
-sub_0280h:
+queue_output_byte_direct:
+; Queues A through the active descriptor without character filtering.
 	push hl			;0280
 	push de			;0281
 	jr l0292h		;0282
-sub_0284h:
+queue_output_byte_checked:
+; Queues A after optional allowed-character checking.
 	push hl			;0284
 	push de			;0285
 	ld hl,080aeh		;0286
 	bit 4,(hl)		;0289
 	jr z,l0292h		;028b
-	call sub_1179h		;028d
+	call is_allowed_input_character		;028d
 	jr c,l029ah		;0290
 l0292h:
 	ld de,(08fdah)		;0292
-	call sub_180ch		;0296
+	call queue_put_byte		;0296
 	ei			;0299
 l029ah:
 	call sub_14d0h		;029a
@@ -966,20 +980,22 @@ block_0013_end:
 
 ; BLOCK 'block_0014' (start 0x03aa end 0x05ea)
 block_0014_start:
+; Initializes IM2, verifies battery SRAM, loads defaults when needed, and initializes runtime structures.
+initialize_ram_and_persistent_state:
 	di			;03aa
 	ld a,001h		;03ab
 	ld i,a		;03ad
 	im 2		;03af
-	call sub_0a5ah		;03b1
+	call verify_battery_settings_checksum		;03b1
 	jr nz,l03c4h		;03b4
 	ld c,000h		;03b6
 	push bc			;03b8
 	call sub_193ch		;03b9
-	call c,block_0077_end		;03bc
+	call c,sub_18fdh		;03bc
 	ld bc,l0029h+2		;03bf
 	jr l040bh		;03c2
 l03c4h:
-	call block_0077_end		;03c4
+	call sub_18fdh		;03c4
 	ld a,08dh		;03c7
 	ld (08120h),a		;03c9
 	ld (08199h),a		;03cc
@@ -1036,10 +1052,10 @@ l043bh:
 	ld (080d5h),hl		;0443
 l0446h:
 	ld hl,block_0029_end+1		;0446
-	call sub_0470h		;0449
+	call initialize_runtime_channel_structures		;0449
 l044ch:
 	call block_0021_end		;044c
-	call sub_0a62h		;044f
+	call update_battery_settings_checksum		;044f
 	call block_0025_end		;0452
 	call block_0029_end		;0455
 	xor a			;0458
@@ -1053,22 +1069,23 @@ l044ch:
 	ld (hl),a			;0466
 	dec a			;0467
 	ld (08831h),a		;0468
-	call sub_0069h		;046b
+	call initialize_scrambler_state		;046b
 	pop bc			;046e
 	ret			;046f
-sub_0470h:
+initialize_runtime_channel_structures:
+; Initializes queue descriptors and per-channel runtime records.
 	ld (08841h),hl		;0470
 	di			;0473
 	ld hl,08fdch		;0474
-	call sub_18ebh		;0477
+	call list_clear		;0477
 	ld hl,08fech		;047a
-	call sub_18ebh		;047d
-	call sub_179ch		;0480
+	call list_clear		;047d
+	call queue_ensure_block		;0480
 	ld hl,08ff0h		;0483
-	call sub_18ebh		;0486
-	call sub_179ch		;0489
+	call list_clear		;0486
+	call queue_ensure_block		;0489
 	ld hl,08fe0h		;048c
-	call sub_18ebh		;048f
+	call list_clear		;048f
 	ld hl,block_0000_start		;0492
 	ld (088a3h),hl		;0495
 	ld hl,(08841h)		;0498
@@ -1076,32 +1093,32 @@ sub_0470h:
 	ld (0883fh),hl		;049d
 	ld a,l			;04a0
 l04a1h:
-	call sub_112bh		;04a1
+	call select_channel_context		;04a1
 	ld de,08041h		;04a4
 	ld hl,(0883fh)		;04a7
 	add hl,de			;04aa
 	ld bc,block_0013_end		;04ab
 	add hl,bc			;04ae
 	ld e,05ah		;04af
-	call sub_0a26h		;04b1
+	call iy_set_word		;04b1
 	ld de,08036h		;04b4
 	ld hl,(0883fh)		;04b7
 	add hl,de			;04ba
 	add hl,bc			;04bb
 	ld e,05ch		;04bc
-	call sub_0a26h		;04be
+	call iy_set_word		;04be
 	ld de,0804fh		;04c1
 	ld hl,(0883fh)		;04c4
 	add hl,de			;04c7
 	add hl,bc			;04c8
 	ld e,05eh		;04c9
-	call sub_0a26h		;04cb
+	call iy_set_word		;04cb
 	ld de,08059h		;04ce
 	ld hl,(0883fh)		;04d1
 	add hl,de			;04d4
 	add hl,bc			;04d5
 	ld e,060h		;04d6
-	call sub_0a26h		;04d8
+	call iy_set_word		;04d8
 	ld hl,(0883fh)		;04db
 	ld (iy+065h),l		;04de
 	ld a,(iy+066h)		;04e1
@@ -1113,8 +1130,8 @@ l04a1h:
 	ld bc,l0040h		;04f0
 	add hl,bc			;04f3
 	xor a			;04f4
-	ld bc,l0018h		;04f5
-	call sub_0518h		;04f8
+	ld bc,test_combined_io_status		;04f5
+	call fill_memory_bc_plus_one		;04f8
 	ld hl,(0883fh)		;04fb
 	inc hl			;04fe
 	ld (0883fh),hl		;04ff
@@ -1127,8 +1144,9 @@ l04a1h:
 	xor a			;050e
 	ld (0889dh),a		;050f
 	ld (0889ch),a		;0512
-	jp sub_112bh		;0515
-sub_0518h:
+	jp select_channel_context		;0515
+fill_memory_bc_plus_one:
+; Fills BC+1 bytes beginning at HL with A using overlapping LDIR.
 	push de			;0518
 	ld (hl),a			;0519
 	ld d,h			;051a
@@ -1137,15 +1155,15 @@ sub_0518h:
 	ldir		;051d
 	pop de			;051f
 	ret			;0520
-l0521h:
-init_main:
+reset_and_main_loop:
+; Cold-start initialization followed by the permanent service loop.
 	in a,(SCC_A_CTRL)		;0521
 	ld a,009h		;0523
 	out (SCC_A_CTRL),a		;0525
 	ld a,0c1h		;0527
 	out (SCC_A_CTRL),a		;0529
 	ld sp,block_0000_start		;052b
-	call sub_0a43h		;052e
+	call compute_rom_checksum		;052e
 	ld hl,08826h		;0531
 	ld de,08827h		;0534
 	ld bc,l07a2h		;0537
@@ -1157,12 +1175,12 @@ init_main:
 	ei			;0547
 	inc c			;0548
 	jp nz,l055ch		;0549
-	call sub_0a62h		;054c
+	call update_battery_settings_checksum		;054c
 	ld hl,0802bh		;054f
 	inc (hl)			;0552
 	call block_0015_end		;0553
 	ld hl,block_0014_end		;0556
-	call sub_135ch		;0559
+	call console_puts_highbit		;0559
 l055ch:
 	ld a,(080b0h)		;055c
 	and 040h		;055f
@@ -1174,7 +1192,7 @@ l055ch:
 	res 0,(hl)		;056d
 	ld hl,080d6h		;056f
 	res 0,(hl)		;0572
-	call sub_0a62h		;0574
+	call update_battery_settings_checksum		;0574
 	call block_0025_end		;0577
 	ei			;057a
 	call block_0015_end		;057b
@@ -1182,7 +1200,7 @@ l057eh:
 	di			;057e
 	call block_0027_end		;057f
 	ei			;0582
-	call sub_0a62h		;0583
+	call update_battery_settings_checksum		;0583
 	ld a,(08824h)		;0586
 	rla			;0589
 	jr nc,l05b0h		;058a
@@ -1195,27 +1213,27 @@ l057eh:
 l0597h:
 	ld a,(hl)			;0597
 	inc hl			;0598
-	call sub_111bh		;0599
+	call terminal_tx_enqueue_raw		;0599
 	djnz l0597h		;059c
 	ei			;059e
 	jr l05adh		;059f
 l05a1h:
-	call sub_0a33h		;05a1
-	call sub_12feh		;05a4
-	call sub_12feh		;05a7
+	call initialize_input_control_sequence		;05a1
+	call print_space		;05a4
+	call print_space		;05a7
 	call block_0039_end		;05aa
 l05adh:
 	call sub_1042h		;05ad
 l05b0h:
 	ld a,(080deh)		;05b0
 	ld (08b7ch),a		;05b3
-	call block_0049_end		;05b6
+	call block_0047_end		;05b6
 	ei			;05b9
 	call sub_7ca1h		;05ba
 	xor a			;05bd
-	call sub_112bh		;05be
+	call select_channel_context		;05be
 l05c1h:
-	call sub_1462h		;05c1
+	call test_terminal_mode_one		;05c1
 	jr c,l05cbh		;05c4
 	call sub_58e1h		;05c6
 	jr l05d9h		;05c9
@@ -1228,10 +1246,10 @@ l05cbh:
 	call block_0023_end		;05d5
 	ei			;05d8
 l05d9h:
-	call sub_1462h		;05d9
+	call test_terminal_mode_one		;05d9
 	jr nc,l05e7h		;05dc
 	call block_0019_end		;05de
-	call sub_4f83h		;05e1
+	call serial_service_dispatch		;05e1
 	call block_0037_end		;05e4
 l05e7h:
 	jp l05c1h		;05e7
@@ -1340,20 +1358,22 @@ block_0015_end:
 
 ; BLOCK 'block_0016' (start 0x0646 end 0x077d)
 block_0016_start:
+; Measures serial timing, selects a baud configuration, then initializes SCC channel A.
+autobaud_detect_and_configure:
 	ld a,003h		;0646
 	out (SCC_A_CTRL),a		;0648
 	ld hl,l0611h		;064a
 	ld a,0c0h		;064d
 	out (SCC_A_CTRL),a		;064f
-	call sub_135ch		;0651
+	call console_puts_highbit		;0651
 l0654h:
-	call sub_4f9eh		;0654
-	call sub_0a73h		;0657
-	call sub_4f9eh		;065a
+	call serial_input_queue_drain		;0654
+	call service_transmit_and_retry_state		;0657
+	call serial_input_queue_drain		;065a
 	call sub_73a5h		;065d
-	call sub_4f83h		;0660
+	call serial_service_dispatch		;0660
 	ld hl,08fd8h		;0663
-	call sub_18a7h		;0666
+	call list_contains_equivalent_block		;0666
 	ei			;0669
 	jr nz,l0654h		;066a
 	in a,(SCC_A_CTRL)		;066c
@@ -1442,7 +1462,7 @@ l06e8h:
 	and a			;06ec
 	sbc hl,de		;06ed
 	jr c,l067ah		;06ef
-	ld bc,l0010h		;06f1
+	ld bc,test_status_80d5_bit0		;06f1
 l06f4h:
 	ld hl,0077bh		;06f4
 	add hl,bc			;06f7
@@ -1495,10 +1515,10 @@ l0722h:
 l073dh:
 	ld hl,(0ff04h)		;073d
 	ld de,(0ff08h)		;0740
-	call sub_0775h		;0744
+	call compare_autobaud_timing_window		;0744
 	jr nc,l076fh		;0747
 	ld hl,(0ff0ch)		;0749
-	call sub_0775h		;074c
+	call compare_autobaud_timing_window		;074c
 	jr nc,l076fh		;074f
 	call block_0013_end		;0751
 	pop bc			;0754
@@ -1522,7 +1542,8 @@ l076fh:
 l0773h:
 	add hl,de			;0773
 	ex de,hl			;0774
-sub_0775h:
+compare_autobaud_timing_window:
+; Arithmetic range comparison used against measured autobaud timing bounds.
 	and a			;0775
 	sbc hl,de		;0776
 	jr c,l0773h		;0778
@@ -1586,10 +1607,12 @@ block_0017_end:
 
 ; BLOCK 'block_0018' (start 0x07ad end 0x07b7)
 block_0018_start:
+; Writes the 30-byte boot register table at 0x07b7 to channel A.
+write_scc_a_boot_table:
 	in a,(SCC_A_CTRL)		;07ad
 	ld b,01eh		;07af
 	ld hl,block_0018_end		;07b1
-	jp l098ch		;07b4
+	jp write_scc_a_control_table		;07b4
 block_0018_end:
 
 ; BLOCK 'block_0019' (start 0x07b7 end 0x07d5)
@@ -1628,16 +1651,18 @@ block_0019_end:
 
 ; BLOCK 'block_0020' (start 0x07d5 end 0x0825)
 block_0020_start:
-	call sub_4f9eh		;07d5
-	call sub_0a73h		;07d8
-	call sub_4f9eh		;07db
-	call sub_0800h		;07de
+; Services queues, persistent-state reporting, and periodic flags from the main loop.
+service_periodic_runtime_tasks:
+	call serial_input_queue_drain		;07d5
+	call service_transmit_and_retry_state		;07d8
+	call serial_input_queue_drain		;07db
+	call report_battery_ram_checksum_failure		;07de
 	call sub_19f5h		;07e1
 	ld hl,0801ah		;07e4
 	bit 7,(hl)		;07e7
 	jr z,l07f1h		;07e9
-	call sub_3da7h		;07eb
-	call sub_4f9eh		;07ee
+	call mailbox_poll_session		;07eb
+	call serial_input_queue_drain		;07ee
 l07f1h:
 	ld hl,0800ch		;07f1
 	bit 0,(hl)		;07f4
@@ -1647,7 +1672,8 @@ sub_07f9h:
 	ld hl,0ffffh		;07f9
 	ld (088f8h),hl		;07fc
 	ret			;07ff
-sub_0800h:
+report_battery_ram_checksum_failure:
+; Reports the bbRAM checksum warning when the scan status changes to failure.
 	ld a,(08003h)		;0800
 	ld hl,088cdh		;0803
 	cp (hl)			;0806
@@ -1655,19 +1681,19 @@ sub_0800h:
 	ld (hl),a			;0808
 	cp 00ah		;0809
 	ret nz			;080b
-	call sub_0a5ah		;080c
+	call verify_battery_settings_checksum		;080c
 	jr z,l0822h		;080f
 	ld (hl),a			;0811
 	rst 10h			;0812
 	jr z,l081ch		;0813
 	ld a,05ah		;0815
-	call sub_10ebh		;0817
+	call send_terminal_control_sequence		;0817
 	jr l0822h		;081a
 l081ch:
 	ld hl,block_0020_end		;081c
-	call sub_135ch		;081f
+	call console_puts_highbit		;081f
 l0822h:
-	jp sub_4f9eh		;0822
+	jp serial_input_queue_drain		;0822
 block_0020_end:
 
 ; BLOCK 'block_0021' (start 0x0825 end 0x0848)
@@ -1713,6 +1739,8 @@ block_0021_end:
 
 ; BLOCK 'block_0022' (start 0x0848 end 0x08f5)
 block_0022_start:
+; Programs Z8530 channel B for the user terminal.
+initialize_scc_b_terminal:
 	ld a,069h		;0848
 	ld (08006h),a		;084a
 	in a,(SCC_B_CTRL)		;084d
@@ -1723,22 +1751,24 @@ l0854h:
 	inc hl			;0855
 	out (SCC_B_CTRL),a		;0856
 	djnz l0854h		;0858
-	call sub_0871h		;085a
+	call calculate_and_program_terminal_brg		;085a
 	ld b,01ch		;085d
 	ld hl,l0921h		;085f
-l0862h:
+write_scc_b_control_table:
+; Writes B bytes from HL to SCC channel B control.
 	ld a,(hl)			;0862
 	inc hl			;0863
 	out (SCC_B_CTRL),a		;0864
-	djnz l0862h		;0866
-	call block_0049_end		;0868
+	djnz write_scc_b_control_table		;0866
+	call block_0047_end		;0868
 	in a,(SCC_B_CTRL)		;086b
 	ld (088afh),a		;086d
 	ret			;0870
-sub_0871h:
+calculate_and_program_terminal_brg:
+; Calculates terminal timing constants and programs channel B WR12/WR13.
 	ld hl,l0001h		;0871
 	ld de,02c00h		;0874
-	call sub_08c8h		;0877
+	call divide_with_clock_divisor		;0877
 	dec de			;087a
 	dec de			;087b
 	ld a,00ch		;087c
@@ -1750,12 +1780,12 @@ sub_0871h:
 	ld a,d			;0887
 	out (SCC_B_CTRL),a		;0888
 	ld de,l0672h		;088a
-	call sub_08c5h		;088d
+	call divide_de_by_configured_clock		;088d
 	ld a,e			;0890
 	inc a			;0891
 	ld (0802eh),a		;0892
 	ld de,048a8h		;0895
-	call sub_08c5h		;0898
+	call divide_de_by_configured_clock		;0898
 	ld a,d			;089b
 	or a			;089c
 	jr nz,l08a4h		;089d
@@ -1771,7 +1801,7 @@ l08a6h:
 l08ach:
 	ld (08040h),a		;08ac
 	ld de,l3b60h		;08af
-	call sub_08c5h		;08b2
+	call divide_de_by_configured_clock		;08b2
 	ld a,d			;08b5
 	or a			;08b6
 	jr nz,l08beh		;08b7
@@ -1784,12 +1814,15 @@ l08c0h:
 	inc a			;08c0
 	ld (08064h),a		;08c1
 	ret			;08c4
-sub_08c5h:
+divide_de_by_configured_clock:
+; Division wrapper used by terminal timing calculations.
 	ld hl,block_0000_start		;08c5
-sub_08c8h:
+divide_with_clock_divisor:
+; Loads the configured clock divisor and enters the shift/divide core.
 	ld bc,(080dch)		;08c8
-	call sub_08cfh		;08cc
-sub_08cfh:
+	call unsigned_shift_divide_24_by_16		;08cc
+unsigned_shift_divide_24_by_16:
+; Tentative restoring-division core used by SCC timing setup.
 	ld a,d			;08cf
 	ld d,e			;08d0
 	ld e,008h		;08d1
@@ -1833,13 +1866,15 @@ block_0023_end:
 
 ; BLOCK 'block_0024' (start 0x08f8 end 0x0909)
 block_0024_start:
+; Writes the six-byte runtime-mode table to channel B.
+apply_scc_b_runtime_mode:
 	ld b,006h		;08f8
 	ld hl,block_0024_end		;08fa
-	call l0862h		;08fd
+	call write_scc_b_control_table		;08fd
 l0900h:
 	ld a,061h		;0900
 	ld (08006h),a		;0902
-	call block_0049_end		;0905
+	call block_0047_end		;0905
 	ret			;0908
 block_0024_end:
 
@@ -1903,6 +1938,8 @@ block_0025_end:
 
 ; BLOCK 'block_0026' (start 0x093d end 0x09a2)
 block_0026_start:
+; Programs Z8530 channel A for the packet modem.
+initialize_scc_a_modem:
 	in a,(SCC_A_CTRL)		;093d
 	ld a,009h		;093f
 	out (SCC_A_CTRL),a		;0941
@@ -1927,26 +1964,28 @@ block_0026_start:
 	set 7,c		;096a
 l096ch:
 	ld (hl),b			;096c
-	call sub_0993h		;096d
+	call write_scc_a_wr3_wr5		;096d
 	push bc			;0970
 	ld b,00ch		;0971
 	ld hl,block_0026_end		;0973
-	call l098ch		;0976
+	call write_scc_a_control_table		;0976
 	pop bc			;0979
 	set 0,c		;097a
 	set 3,b		;097c
-	call sub_0993h		;097e
+	call write_scc_a_wr3_wr5		;097e
 	ld (08007h),a		;0981
 	call block_0027_end		;0984
 	ld b,010h		;0987
 	ld hl,l09aeh		;0989
-l098ch:
+write_scc_a_control_table:
+; Writes B bytes from HL to SCC channel A control.
 	ld a,(hl)			;098c
 	inc hl			;098d
 	out (SCC_A_CTRL),a		;098e
-	djnz l098ch		;0990
+	djnz write_scc_a_control_table		;0990
 	ret			;0992
-sub_0993h:
+write_scc_a_wr3_wr5:
+; Writes C to WR3 and B to WR5 on channel A.
 	ld a,003h		;0993
 	out (SCC_A_CTRL),a		;0995
 	ld a,c			;0997
@@ -1993,9 +2032,11 @@ block_0027_end:
 
 ; BLOCK 'block_0028' (start 0x09be end 0x09df)
 block_0028_start:
+; Programs channel A WR12/WR13 from the selected baud-rate table entry.
+program_scc_a_brg:
 	ld hl,(0808dh)		;09be
 	ld (088b3h),hl		;09c1
-	call sub_1077h		;09c4
+	call lookup_timing_table_index		;09c4
 	ld c,b			;09c7
 	ld a,00ch		;09c8
 	out (SCC_A_CTRL),a		;09ca
@@ -2051,6 +2092,8 @@ block_0029_end:
 
 ; BLOCK 'block_0030' (start 0x09ff end 0x0a11)
 block_0030_start:
+; Copies one of two five-byte defaults into SRAM 0x88fa.
+initialize_five_byte_control_block:
 	ld de,088fah		;09ff
 	ld bc,l0003h+2		;0a02
 	ld hl,block_0030_end		;0a05
@@ -2079,6 +2122,8 @@ block_0031_end:
 
 ; BLOCK 'block_0032' (start 0x0a1b end 0x0f80)
 block_0032_start:
+; Returns the little-endian word at IY+E in HL.
+iy_get_word:
 	push iy		;0a1b
 	pop hl			;0a1d
 	ld d,000h		;0a1e
@@ -2088,7 +2133,8 @@ block_0032_start:
 	ld d,(hl)			;0a23
 	ex de,hl			;0a24
 	ret			;0a25
-sub_0a26h:
+iy_set_word:
+; Stores HL at IY+E and returns the destination in DE.
 	push hl			;0a26
 	push iy		;0a27
 	pop hl			;0a29
@@ -2100,7 +2146,8 @@ sub_0a26h:
 	ld (hl),d			;0a30
 	ex de,hl			;0a31
 	ret			;0a32
-sub_0a33h:
+initialize_input_control_sequence:
+; Tentative: initializes a five-byte input control sequence at 0x89f9.
 	call sub_1567h		;0a33
 	ret c			;0a36
 	ld hl,block_0036_end		;0a37
@@ -2108,27 +2155,32 @@ sub_0a33h:
 	ld bc,l0003h+2		;0a3d
 	ldir		;0a40
 	ret			;0a42
-sub_0a43h:
+compute_rom_checksum:
+; Computes the additive checksum over ROM 0x0000-0x7fff and stores it at 0x8825.
 	ld hl,block_0000_start		;0a43
 	ld bc,l0080h		;0a46
-	call sub_0a69h		;0a49
+	call additive_checksum_blocks		;0a49
 	ld (08825h),a		;0a4c
 	ret			;0a4f
-sub_0a50h:
+compute_battery_settings_checksum:
+; Computes the additive checksum over battery SRAM 0x802b-0x83d4.
 	ld hl,0802bh		;0a50
 	ld bc,0aa04h		;0a53
-	call sub_0a69h		;0a56
+	call additive_checksum_blocks		;0a56
 	ret			;0a59
-sub_0a5ah:
-	call sub_0a50h		;0a5a
+verify_battery_settings_checksum:
+; Compares the calculated battery-settings checksum with SRAM 0x881d.
+	call compute_battery_settings_checksum		;0a5a
 	ld hl,0881dh		;0a5d
 	cp (hl)			;0a60
 	ret			;0a61
-sub_0a62h:
-	call sub_0a50h		;0a62
+update_battery_settings_checksum:
+; Recomputes and stores the battery-settings checksum at 0x881d.
+	call compute_battery_settings_checksum		;0a62
 	ld (0881dh),a		;0a65
 	ret			;0a68
-sub_0a69h:
+additive_checksum_blocks:
+; Adds bytes at HL modulo 256 using B as inner length and C as block count.
 	xor a			;0a69
 l0a6ah:
 	add a,(hl)			;0a6a
@@ -2137,22 +2189,23 @@ l0a6ah:
 	dec c			;0a6e
 	jp nz,l0a6ah		;0a6f
 	ret			;0a72
-sub_0a73h:
+service_transmit_and_retry_state:
+; Tentative: services output descriptors, retry counters, and AX.25 state.
 	ld hl,08019h		;0a73
 	bit 6,(hl)		;0a76
 	jr z,l0a8ch		;0a78
 	ld hl,08ff0h		;0a7a
-	call sub_18a7h		;0a7d
+	call list_contains_equivalent_block		;0a7d
 	ei			;0a80
 	jr z,l0a8ch		;0a81
 	ld a,(08820h)		;0a83
-	call sub_112bh		;0a86
+	call select_channel_context		;0a86
 	call sub_5b1eh		;0a89
 l0a8ch:
 	ld a,(0889dh)		;0a8c
-	call sub_112bh		;0a8f
+	call select_channel_context		;0a8f
 	ld hl,08fd0h		;0a92
-	call sub_18a7h		;0a95
+	call list_contains_equivalent_block		;0a95
 	jr nz,l0aa4h		;0a98
 	ld hl,block_0000_start		;0a9a
 	ld (088a7h),hl		;0a9d
@@ -2166,7 +2219,7 @@ l0aa4h:
 	rla			;0aab
 	jp nc,l0c29h		;0aac
 l0aafh:
-	call 0183bh		;0aaf
+	call queue_get_byte_hl		;0aaf
 	ld hl,(088a7h)		;0ab2
 	dec hl			;0ab5
 	ld (088a7h),hl		;0ab6
@@ -2184,7 +2237,7 @@ l0abfh:
 	jr z,l0ad7h		;0acb
 	rst 28h			;0acd
 	jp z,l0c11h		;0ace
-	call sub_0f4eh		;0ad1
+	call map_flow_control_character		;0ad1
 	jp z,l0c11h		;0ad4
 l0ad7h:
 	push af			;0ad7
@@ -2247,7 +2300,7 @@ l0b3bh:
 	bit 5,(hl)		;0b42
 	res 5,(hl)		;0b44
 	jr z,l0b59h		;0b46
-	call sub_0f5ch		;0b48
+	call parse_channel_designator		;0b48
 	push af			;0b4b
 	jr nc,l0b56h		;0b4c
 	call sub_0d61h		;0b4e
@@ -2296,14 +2349,14 @@ l0b9bh:
 	ld a,(08096h)		;0b9b
 	cp h			;0b9e
 	jr nz,l0bb9h		;0b9f
-	call sub_102ah		;0ba1
+	call command_length_at_least_four		;0ba1
 	jr z,l0bb6h		;0ba4
 	ld hl,(089f7h)		;0ba6
 	dec hl			;0ba9
 	ld (089f7h),hl		;0baa
 	call sub_10d3h		;0bad
-	call sub_102ah		;0bb0
-	call z,sub_1022h		;0bb3
+	call command_length_at_least_four		;0bb0
+	call z,block_0035_end		;0bb3
 l0bb6h:
 	jp l0c0eh		;0bb6
 l0bb9h:
@@ -2320,10 +2373,10 @@ l0bbfh:
 l0bcch:
 	ld a,(hl)			;0bcc
 	inc hl			;0bcd
-	call sub_123ch		;0bce
+	call console_putchar		;0bce
 	djnz l0bcch		;0bd1
 l0bd3h:
-	call sub_1022h		;0bd3
+	call block_0035_end		;0bd3
 	jp l0c0eh		;0bd6
 l0bd9h:
 	ld a,(08097h)		;0bd9
@@ -2344,17 +2397,17 @@ l0bf4h:
 	ld a,(08094h)		;0bf4
 	cp h			;0bf7
 	jr nz,l0bffh		;0bf8
-	call sub_1022h		;0bfa
+	call block_0035_end		;0bfa
 	jr l0c0eh		;0bfd
 l0bffh:
 	ld a,h			;0bff
 	cp 00dh		;0c00
 	jr nz,l0c10h		;0c02
 l0c04h:
-	call sub_1022h		;0c04
-	call block_0093_end		;0c07
+	call block_0035_end		;0c04
+	call block_0067_end		;0c07
 	rst 10h			;0c0a
-	call z,sub_0a33h		;0c0b
+	call z,initialize_input_control_sequence		;0c0b
 l0c0eh:
 	pop af			;0c0e
 l0c0fh:
@@ -2380,7 +2433,7 @@ l0c2bh:
 	ld hl,0801ch		;0c2b
 	bit 0,(hl)		;0c2e
 	ret nz			;0c30
-	call sub_4f9eh		;0c31
+	call serial_input_queue_drain		;0c31
 	xor a			;0c34
 	ld (08018h),a		;0c35
 	ld hl,0801dh		;0c38
@@ -2396,7 +2449,7 @@ l0c2bh:
 	rst 10h			;0c50
 	jr nz,l0c77h		;0c51
 	ld hl,08fd0h		;0c53
-	call sub_18a7h		;0c56
+	call list_contains_equivalent_block		;0c56
 	jr nz,l0c64h		;0c59
 	ld hl,block_0000_start		;0c5b
 	ld (088a7h),hl		;0c5e
@@ -2407,16 +2460,16 @@ l0c64h:
 	ld a,(08824h)		;0c65
 	rla			;0c68
 	jr c,l0c77h		;0c69
-	call 0183bh		;0c6b
+	call queue_get_byte_hl		;0c6b
 	ld hl,(088a7h)		;0c6e
 	dec hl			;0c71
 	ld (088a7h),hl		;0c72
 	jr l0cbch		;0c75
 l0c77h:
 	ld hl,08fcch		;0c77
-	call sub_18a7h		;0c7a
+	call list_contains_equivalent_block		;0c7a
 	jr z,l0c8bh		;0c7d
-	call 0183bh		;0c7f
+	call queue_get_byte_hl		;0c7f
 	ld hl,(088a9h)		;0c82
 	dec hl			;0c85
 	ld (088a9h),hl		;0c86
@@ -2430,9 +2483,9 @@ l0c8bh:
 	ld a,(083dfh)		;0c95
 	or a			;0c98
 	jr nz,l0cbbh		;0c99
-	call sub_1037h		;0c9b
+	call command_buffer_is_empty		;0c9b
 	jr z,l0cbbh		;0c9e
-	call block_0059_end		;0ca0
+	call sub_1522h		;0ca0
 	jr c,l0cbbh		;0ca3
 	ld a,(08824h)		;0ca5
 	and 040h		;0ca8
@@ -2456,7 +2509,7 @@ l0cbch:
 	jp z,l0d6dh		;0cc8
 	dec c			;0ccb
 	jp nz,l0c2bh		;0ccc
-	call block_0057_end		;0ccf
+	call block_0055_end		;0ccf
 	jr c,l0cd4h		;0cd2
 l0cd4h:
 	ld hl,08018h		;0cd4
@@ -2473,7 +2526,7 @@ l0cdch:
 	bit 5,(hl)		;0cee
 	res 5,(hl)		;0cf0
 	jr z,l0d04h		;0cf2
-	call sub_0f5ch		;0cf4
+	call parse_channel_designator		;0cf4
 	jr nc,l0d01h		;0cf7
 	push af			;0cf9
 	call sub_0d61h		;0cfa
@@ -2503,12 +2556,12 @@ l0d04h:
 	ld a,(08094h)		;0d2c
 	cp h			;0d2f
 	jp z,l0e9bh		;0d30
-	call block_0057_end		;0d33
+	call block_0055_end		;0d33
 	jr nc,l0d47h		;0d36
 	ld a,h			;0d38
 	cp 00dh		;0d39
 	jr nz,l0d45h		;0d3b
-	call sub_1022h		;0d3d
+	call block_0035_end		;0d3d
 	ld hl,08018h		;0d40
 	set 1,(hl)		;0d43
 l0d45h:
@@ -2518,7 +2571,7 @@ l0d47h:
 	cp h			;0d4a
 	jr nz,l0d69h		;0d4b
 l0d4dh:
-	call sub_1022h		;0d4d
+	call block_0035_end		;0d4d
 	ld a,h			;0d50
 	ld hl,08018h		;0d51
 	set 1,(hl)		;0d54
@@ -2529,7 +2582,7 @@ l0d4dh:
 	and 004h		;0d5d
 	jr nz,l0d69h		;0d5f
 sub_0d61h:
-	call sub_1037h		;0d61
+	call command_buffer_is_empty		;0d61
 	jp nz,l0df8h		;0d64
 	ei			;0d67
 	ret			;0d68
@@ -2538,7 +2591,7 @@ l0d69h:
 	rst 10h			;0d6a
 	jr z,l0d72h		;0d6b
 l0d6dh:
-	call sub_1416h		;0d6d
+	call test_input_or_echo_path		;0d6d
 	jr z,l0da8h		;0d70
 l0d72h:
 	ld hl,080abh		;0d72
@@ -2568,8 +2621,8 @@ l0d95h:
 l0da5h:
 	jp l0c2bh		;0da5
 l0da8h:
-	call sub_0f1bh		;0da8
-	call block_0057_end		;0dab
+	call command_buffer_put		;0da8
+	call block_0055_end		;0dab
 	jr c,l0dd0h		;0dae
 	ld hl,0889eh		;0db0
 	ld a,(hl)			;0db3
@@ -2589,7 +2642,7 @@ l0dbch:
 	ld a,(08034h)		;0dc9
 	or a			;0dcc
 l0dcdh:
-	call z,block_0161_end		;0dcd
+	call z,block_0135_end		;0dcd
 l0dd0h:
 	ld hl,(08ff8h)		;0dd0
 	ld de,(08ffah)		;0dd3
@@ -2610,9 +2663,9 @@ l0de7h:
 	bit 1,(hl)		;0df1
 	jr z,l0da5h		;0df3
 l0df5h:
-	call sub_1022h		;0df5
+	call block_0035_end		;0df5
 l0df8h:
-	call block_0057_end		;0df8
+	call block_0055_end		;0df8
 	jr nc,l0e03h		;0dfb
 	ld hl,0801ch		;0dfd
 	set 0,(hl)		;0e00
@@ -2622,7 +2675,7 @@ l0e03h:
 	ld a,(hl)			;0e06
 	ld (hl),0ffh		;0e07
 l0e09h:
-	call sub_112bh		;0e09
+	call select_channel_context		;0e09
 	jp sub_5b1eh		;0e0c
 l0e0fh:
 	res 7,(hl)		;0e0f
@@ -2650,25 +2703,25 @@ l0e29h:
 l0e34h:
 	call sub_10c5h		;0e34
 l0e37h:
-	call sub_1037h		;0e37
+	call command_buffer_is_empty		;0e37
 	jr z,l0e49h		;0e3a
-	call sub_0f09h		;0e3c
+	call command_buffer_previous_pointer		;0e3c
 	ld a,(hl)			;0e3f
 	cp 00dh		;0e40
 	jr z,l0e49h		;0e42
 	ld (08ff8h),hl		;0e44
 	jr l0e37h		;0e47
 l0e49h:
-	call sub_1022h		;0e49
+	call block_0035_end		;0e49
 	jr l0e62h		;0e4c
 l0e4eh:
-	call sub_1037h		;0e4e
+	call command_buffer_is_empty		;0e4e
 	jr z,l0e62h		;0e51
-	call sub_0f09h		;0e53
+	call command_buffer_previous_pointer		;0e53
 	ld (08ff8h),hl		;0e56
 	call sub_10d3h		;0e59
-	call sub_1037h		;0e5c
-	call z,sub_1022h		;0e5f
+	call command_buffer_is_empty		;0e5c
+	call z,block_0035_end		;0e5f
 l0e62h:
 	jr l0e98h		;0e62
 l0e64h:
@@ -2681,7 +2734,7 @@ l0e6bh:
 	jr z,l0e87h		;0e71
 	push de			;0e73
 	ld a,(de)			;0e74
-	call sub_123ch		;0e75
+	call console_putchar		;0e75
 	pop de			;0e78
 	inc de			;0e79
 	ld hl,08fc9h		;0e7a
@@ -2691,7 +2744,7 @@ l0e6bh:
 	ld de,08b7dh		;0e82
 	jr l0e6bh		;0e85
 l0e87h:
-	call sub_1022h		;0e87
+	call block_0035_end		;0e87
 	jr l0e98h		;0e8a
 l0e8ch:
 	ld hl,08011h		;0e8c
@@ -2708,7 +2761,7 @@ l0e9bh:
 	ld (08ff8h),hl		;0e9f
 	ei			;0ea2
 	call sub_10c5h		;0ea3
-	call sub_1022h		;0ea6
+	call block_0035_end		;0ea6
 	jp l0de7h		;0ea9
 sub_0each:
 	ld hl,08011h		;0eac
@@ -2762,11 +2815,12 @@ l0ef1h:
 	jr l0f06h		;0eff
 l0f01h:
 	ld a,000h		;0f01
-	call sub_10ebh		;0f03
+	call send_terminal_control_sequence		;0f03
 l0f06h:
 	ld c,003h		;0f06
 	ret			;0f08
-sub_0f09h:
+command_buffer_previous_pointer:
+; Returns the previous command-buffer address with wraparound.
 	ld de,(08ff8h)		;0f09
 	ld hl,08b7dh		;0f0d
 	and a			;0f10
@@ -2777,7 +2831,8 @@ sub_0f09h:
 l0f19h:
 	dec hl			;0f19
 	ret			;0f1a
-sub_0f1bh:
+command_buffer_put:
+; Writes A to the command ring unless advancing would collide with its read pointer.
 	ld de,(08ff8h)		;0f1b
 	ld (de),a			;0f1f
 	inc de			;0f20
@@ -2793,7 +2848,8 @@ l0f2ch:
 	ret z			;0f32
 	ld (08ff8h),de		;0f33
 	ret			;0f37
-sub_0f38h:
+command_buffer_get:
+; Reads and advances the command ring read pointer with wraparound.
 	ld de,(08ffah)		;0f38
 	ld a,(de)			;0f3c
 	inc de			;0f3d
@@ -2805,7 +2861,8 @@ sub_0f38h:
 l0f49h:
 	ld (08ffah),de		;0f49
 	ret			;0f4d
-sub_0f4eh:
+map_flow_control_character:
+; Maps internal quoted flow-control bytes 0xdc/0xdd to 0xc0/0xdb.
 	ld a,0dch		;0f4e
 	cp c			;0f50
 	ld a,0c0h		;0f51
@@ -2816,8 +2873,9 @@ sub_0f4eh:
 	ret z			;0f59
 	ld a,c			;0f5a
 	ret			;0f5b
-sub_0f5ch:
-	call sub_136dh		;0f5c
+parse_channel_designator:
+; Parses numeric or configured alphabetic channel designators into A=0..9.
+	call ascii_to_uppercase		;0f5c
 	sub 030h		;0f5f
 	ld hl,080b4h		;0f61
 	bit 3,(hl)		;0f64
@@ -2830,9 +2888,9 @@ l0f70h:
 	ret c			;0f72
 	push hl			;0f73
 	ld hl,block_0032_end		;0f74
-	call sub_135ch		;0f77
+	call console_puts_highbit		;0f77
 	pop hl			;0f7a
-	call sub_135ch		;0f7b
+	call console_puts_highbit		;0f7b
 	and a			;0f7e
 	ret			;0f7f
 block_0032_end:
@@ -2872,6 +2930,8 @@ block_0033_end:
 
 ; BLOCK 'block_0034' (start 0x0f99 end 0x0ffe)
 block_0034_start:
+; Formats date/time fields from SRAM into an ASCII work buffer.
+format_datetime:
 	ld a,(088e3h)		;0f99
 	or a			;0f9c
 	ld a,02ah		;0f9d
@@ -2879,12 +2939,12 @@ block_0034_start:
 	ld hl,088e0h		;0fa0
 	ld de,088e5h		;0fa3
 	di			;0fa6
-	call sub_0feeh		;0fa7
+	call append_two_bcd_nibbles		;0fa7
 	ld a,03ah		;0faa
 	ld (de),a			;0fac
 	inc de			;0fad
 	inc hl			;0fae
-	call sub_0feeh		;0faf
+	call append_two_bcd_nibbles		;0faf
 	ld hl,080ach		;0fb2
 	bit 6,(hl)		;0fb5
 	ld a,005h		;0fb7
@@ -2893,7 +2953,7 @@ block_0034_start:
 	ld (de),a			;0fbd
 	inc de			;0fbe
 	ld hl,088e4h		;0fbf
-	call sub_0feeh		;0fc2
+	call append_two_bcd_nibbles		;0fc2
 	ld a,02dh		;0fc5
 	ld (de),a			;0fc7
 	inc de			;0fc8
@@ -2919,20 +2979,22 @@ l0fdah:
 	ld (de),a			;0fe2
 	inc de			;0fe3
 	ld hl,088e2h		;0fe4
-	call sub_0feeh		;0fe7
+	call append_two_bcd_nibbles		;0fe7
 	ld a,00fh		;0fea
 l0fech:
 	ei			;0fec
 	ret			;0fed
-sub_0feeh:
+append_two_bcd_nibbles:
+; Appends two packed-decimal nibbles to the buffer at DE.
 	ld a,(hl)			;0fee
-	call sub_0ff7h		;0fef
+	call append_decimal_nibble		;0fef
 	ld a,(hl)			;0ff2
 	rra			;0ff3
 	rra			;0ff4
 	rra			;0ff5
 	rra			;0ff6
-sub_0ff7h:
+append_decimal_nibble:
+; Appends low nibble A as ASCII '0'+value to the buffer at DE.
 	and 00fh		;0ff7
 	or 030h		;0ff9
 	ld (de),a			;0ffb
@@ -2940,10 +3002,8 @@ sub_0ff7h:
 	ret			;0ffd
 block_0034_end:
 
-; BLOCK 'block_0035' (start 0x0ffe end 0x1023)
+; BLOCK 'block_0035' (start 0x0ffe end 0x1022)
 block_0035_start:
-; high-bit-terminated text, ends at 0x1022: JanFebMarAprMayJunJulAugSepOctNovDece
-str_0ffe_janfebmaraprmayjunjulaugsepoctnovdece:
 	defb 04ah		;0ffe
 	defb 061h		;0fff
 	defb 06eh		;1000
@@ -2980,17 +3040,17 @@ str_0ffe_janfebmaraprmayjunjulaugsepoctnovdece:
 	defb 044h		;101f
 	defb 065h		;1020
 	defb 063h		;1021
-sub_1022h:
-	defb 0e5h		;1022
 block_0035_end:
 
-; BLOCK 'block_0036' (start 0x1023 end 0x106f)
+; BLOCK 'block_0036' (start 0x1022 end 0x106f)
 block_0036_start:
+	push hl			;1022
 	ld hl,08013h		;1023
 	res 6,(hl)		;1026
 	pop hl			;1028
 	ret			;1029
-sub_102ah:
+command_length_at_least_four:
+; Compares the active command length against four.
 	ld a,(089f7h)		;102a
 	call sub_1567h		;102d
 	jr nc,l1034h		;1030
@@ -2999,7 +3059,8 @@ sub_102ah:
 l1034h:
 	cp 004h		;1034
 	ret			;1036
-sub_1037h:
+command_buffer_is_empty:
+; Compares command ring write and read pointers; Z means empty.
 	ld hl,(08ff8h)		;1037
 	ld de,(08ffah)		;103a
 	and a			;103e
@@ -3009,22 +3070,22 @@ sub_1042h:
 	rst 10h			;1042
 	jr z,l104ch		;1043
 	call sub_1567h		;1045
-	call c,block_0127_end		;1048
+	call c,block_0101_end		;1048
 	ret			;104b
 l104ch:
 	ld a,(0889dh)		;104c
-	call sub_112bh		;104f
+	call select_channel_context		;104f
 	ld hl,08824h		;1052
 	set 7,(hl)		;1055
 	call sub_1567h		;1057
-	jp c,block_0127_end		;105a
+	jp c,block_0101_end		;105a
 	ld hl,l0003h+1		;105d
 	ld (089f7h),hl		;1060
 	ld b,l			;1063
 	ld hl,block_0036_end		;1064
 l1067h:
 	ld a,(hl)			;1067
-	call sub_1304h		;1068
+	call console_putchar_routed		;1068
 	inc hl			;106b
 	djnz l1067h		;106c
 	ret			;106e
@@ -3042,7 +3103,8 @@ block_0037_end:
 ; BLOCK 'block_0038' (start 0x1074 end 0x1089)
 block_0038_start:
 	jp l24fbh		;1074
-sub_1077h:
+lookup_timing_table_index:
+; Searches the 16-entry timing table for HL and returns a reverse index in B.
 	ld de,block_0038_end		;1077
 	ld b,010h		;107a
 l107ch:
@@ -3099,22 +3161,22 @@ block_0039_end:
 ; BLOCK 'block_0040' (start 0x10a9 end 0x1140)
 block_0040_start:
 	ld hl,l0305h		;10a9
-	call sub_135ch		;10ac
+	call console_puts_highbit		;10ac
 	ld a,(08825h)		;10af
 	or a			;10b2
 	ret z			;10b3
 	push af			;10b4
-	call sub_1479h		;10b5
+	call print_prompt_marker		;10b5
 	ld hl,l0396h		;10b8
-	call sub_135ch		;10bb
+	call console_puts_highbit		;10bb
 	pop af			;10be
-	call sub_12e0h		;10bf
-	jp l1302h		;10c2
+	call print_dollar_hex_byte		;10bf
+	jp print_carriage_return		;10c2
 sub_10c5h:
 	ld a,001h		;10c5
 	ld (08008h),a		;10c7
 	ld a,05ch		;10ca
-	call sub_4f5dh		;10cc
+	call terminal_echo_character		;10cc
 	ld a,00dh		;10cf
 	jr l10e6h		;10d1
 sub_10d3h:
@@ -3124,48 +3186,53 @@ sub_10d3h:
 	jr z,l10e6h		;10da
 	call sub_10e4h		;10dc
 	ld a,020h		;10df
-	call sub_4f5dh		;10e1
+	call terminal_echo_character		;10e1
 sub_10e4h:
 	ld a,008h		;10e4
 l10e6h:
-	call sub_4f5dh		;10e6
+	call terminal_echo_character		;10e6
 	ei			;10e9
 	ret			;10ea
-sub_10ebh:
+send_terminal_control_sequence:
+; Queues a framed and escaped terminal control sequence.
 	push af			;10eb
 	ld a,001h		;10ec
-	call sub_111bh		;10ee
+	call terminal_tx_enqueue_raw		;10ee
 	ld a,05fh		;10f1
-	call sub_111bh		;10f3
+	call terminal_tx_enqueue_raw		;10f3
 	ld a,058h		;10f6
-	call sub_1108h		;10f8
+	call queue_escaped_control_byte		;10f8
 	ld a,058h		;10fb
-	call sub_1108h		;10fd
+	call queue_escaped_control_byte		;10fd
 	pop af			;1100
-	call sub_1108h		;1101
+	call queue_escaped_control_byte		;1101
 	ld a,017h		;1104
-	jr l1122h		;1106
-sub_1108h:
+	jr terminal_tx_enqueue_raw_ei		;1106
+queue_escaped_control_byte:
+; Prefixes reserved control bytes before terminal transmission.
 	cp 001h		;1108
 	jr z,l1114h		;110a
 	cp 010h		;110c
 	jr z,l1114h		;110e
 	cp 017h		;1110
-	jr nz,sub_111bh		;1112
+	jr nz,terminal_tx_enqueue_raw		;1112
 l1114h:
 	push af			;1114
 	ld a,010h		;1115
-	call sub_111bh		;1117
+	call terminal_tx_enqueue_raw		;1117
 	pop af			;111a
-sub_111bh:
+terminal_tx_enqueue_raw:
+; Queues A through the terminal transmit descriptor at 0x8fd6.
 	ld de,(08fd6h)		;111b
-	jp sub_180ch		;111f
-l1122h:
+	jp queue_put_byte		;111f
+terminal_tx_enqueue_raw_ei:
+; Queues A through the terminal transmit descriptor and enables interrupts.
 	ld de,(08fd6h)		;1122
-	call sub_180ch		;1126
+	call queue_put_byte		;1126
 	ei			;1129
 	ret			;112a
-sub_112bh:
+select_channel_context:
+; Maps channel A=0..9 to its fixed-size record in IY; carry indicates invalid input.
 	cp 00ah		;112b
 	ccf			;112d
 	ret c			;112e
@@ -3222,7 +3289,7 @@ block_0043_start:
 	defb 004h		;1163
 block_0043_end:
 
-; BLOCK 'block_0044' (start 0x1164 end 0x11ae)
+; BLOCK 'block_0044' (start 0x1164 end 0x12cd)
 block_0044_start:
 	call block_0011_end		;1164
 	ret nz			;1167
@@ -3237,7 +3304,8 @@ block_0044_start:
 	ld (hl),a			;1176
 	ei			;1177
 	ret			;1178
-sub_1179h:
+is_allowed_input_character:
+; Tests A against configured and built-in accepted input characters.
 	push hl			;1179
 	push bc			;117a
 	ld hl,080a4h		;117b
@@ -3272,29 +3340,23 @@ l11a4h:
 	pop hl			;11a5
 	scf			;11a6
 	ret			;11a7
-sub_11a8h:
+prepare_unsigned_divide_by_10:
+; Prepares unsigned division of HL by ten.
 	ld a,00ah		;11a8
-sub_11aah:
+prepare_unsigned_divide:
+; Prepares unsigned division of HL by the radix in A.
 	ld e,a			;11aa
 	xor a			;11ab
 	ld d,a			;11ac
 	ex de,hl			;11ad
-block_0044_end:
-
-; BLOCK 'block_0045' (start 0x11ae end 0x11b4)
-block_0045_start:
-; high-bit-terminated text, ends at 0x11b3: DM<)0z
-str_11ae_dm_0z:
-	defb 044h		;11ae
-	defb 04dh		;11af
-	defb 03ch		;11b0
-	defb 029h		;11b1
-	defb 030h		;11b2
-	defb 0fah		;11b3
-block_0045_end:
-
-; BLOCK 'block_0046' (start 0x11b4 end 0x12cd)
-block_0046_start:
+l11aeh:
+	ld b,h			;11ae
+	ld c,l			;11af
+	inc a			;11b0
+	add hl,hl			;11b1
+	jr nc,l11aeh		;11b2
+; Shift/subtract division core; decimal callers receive quotient in HL and remainder in E.
+unsigned_divide_core:
 	ld hl,block_0000_start		;11b4
 l11b7h:
 	push af			;11b7
@@ -3312,17 +3374,18 @@ l11b7h:
 	dec a			;11c8
 	jr nz,l11b7h		;11c9
 	ret			;11cb
-sub_11cch:
+print_u16_decimal:
+; Prints unsigned HL in decimal without leading zeroes.
 	push bc			;11cc
 	push de			;11cd
 	push hl			;11ce
-	call sub_11a8h		;11cf
+	call prepare_unsigned_divide_by_10		;11cf
 	ld a,h			;11d2
 	or l			;11d3
-	call nz,sub_11cch		;11d4
+	call nz,print_u16_decimal		;11d4
 	ld a,e			;11d7
 	or 030h		;11d8
-	call sub_1304h		;11da
+	call console_putchar_routed		;11da
 	pop hl			;11dd
 	pop de			;11de
 	pop bc			;11df
@@ -3336,11 +3399,11 @@ sub_11e1h:
 	call sub_14d0h		;11ea
 	ret c			;11ed
 	ld a,(08099h)		;11ee
-	call sub_0056h		;11f1
-	call sub_0284h		;11f4
+	call translate_escape_character		;11f1
+	call queue_output_byte_checked		;11f4
 	ld a,(iy+065h)		;11f7
-	call sub_1231h		;11fa
-	call sub_0284h		;11fd
+	call channel_number_to_ascii		;11fa
+	call queue_output_byte_checked		;11fd
 	ld a,(iy+065h)		;1200
 	ld (0889ch),a		;1203
 	ld hl,08008h		;1206
@@ -3354,29 +3417,31 @@ sub_11e1h:
 	or a			;1217
 	jr z,l1229h		;1218
 	ld a,03ah		;121a
-	call sub_1304h		;121c
+	call console_putchar_routed		;121c
 	push iy		;121f
 	pop hl			;1221
 	ld de,block_0000_end		;1222
 	add hl,de			;1225
-	call block_0061_end		;1226
+	call block_0057_end		;1226
 l1229h:
 	ld a,03ah		;1229
-	call sub_1304h		;122b
-	jp sub_12feh		;122e
-sub_1231h:
+	call console_putchar_routed		;122b
+	jp print_space		;122e
+channel_number_to_ascii:
+; Converts a channel number to numeric or configured alphabetic notation.
 	or 030h		;1231
 	ld hl,080b4h		;1233
 	bit 3,(hl)		;1236
 	ret z			;1238
 	add a,011h		;1239
 	ret			;123b
-sub_123ch:
+console_putchar:
+; Routes A according to terminal, packet-session, echo, and translation state.
 	rst 10h			;123c
 	jr z,l124dh		;123d
-	call sub_1416h		;123f
+	call test_input_or_echo_path		;123f
 	jr nz,l1247h		;1242
-	jp sub_0284h		;1244
+	jp queue_output_byte_checked		;1244
 l1247h:
 	push bc			;1247
 	ld c,a			;1248
@@ -3404,23 +3469,23 @@ l124dh:
 	jr z,l1270h		;1268
 	cp c			;126a
 	jr nz,l1270h		;126b
-	call sub_0284h		;126d
+	call queue_output_byte_checked		;126d
 l1270h:
-	call sub_1416h		;1270
+	call test_input_or_echo_path		;1270
 	ld a,c			;1273
 	jp z,l12a7h		;1274
 l1277h:
 	ld hl,(080a1h)		;1277
 	bit 1,l		;127a
-	call nz,sub_136dh		;127c
+	call nz,ascii_to_uppercase		;127c
 	bit 0,l		;127f
-	call nz,sub_12d5h		;1281
-	call sub_0056h		;1284
+	call nz,ascii_to_lowercase		;1281
+	call translate_escape_character		;1284
 	ld hl,080b0h		;1287
 	bit 4,(hl)		;128a
 	jr z,l1292h		;128c
 	cp 00ah		;128e
-	jr z,block_0047_end		;1290
+	jr z,block_0045_end		;1290
 l1292h:
 	cp 00dh		;1292
 	jr nz,l12ach		;1294
@@ -3429,10 +3494,10 @@ l1292h:
 	ld hl,080b0h		;129b
 	bit 4,(hl)		;129e
 	jr z,l12a7h		;12a0
-	call sub_0284h		;12a2
+	call queue_output_byte_checked		;12a2
 	ld a,00ah		;12a5
 l12a7h:
-	call sub_0284h		;12a7
+	call queue_output_byte_checked		;12a7
 	jr l12cfh		;12aa
 l12ach:
 	rst 10h			;12ac
@@ -3448,21 +3513,21 @@ l12ach:
 	cp (hl)			;12be
 	jr nc,l12c9h		;12bf
 	ld a,c			;12c1
-	call sub_0284h		;12c2
+	call queue_output_byte_checked		;12c2
 	ld a,00dh		;12c5
 	jr l1292h		;12c7
 l12c9h:
 	ld a,c			;12c9
-	call sub_0284h		;12ca
-block_0046_end:
+	call queue_output_byte_checked		;12ca
+block_0044_end:
 
-; BLOCK 'block_0047' (start 0x12cd end 0x12ce)
-block_0047_start:
+; BLOCK 'block_0045' (start 0x12cd end 0x12ce)
+block_0045_start:
 	defb 03eh		;12cd
-block_0047_end:
+block_0045_end:
 
-; BLOCK 'block_0048' (start 0x12ce end 0x13d1)
-block_0048_start:
+; BLOCK 'block_0046' (start 0x12ce end 0x13d1)
+block_0046_start:
 	and a			;12ce
 l12cfh:
 	pop hl			;12cf
@@ -3471,7 +3536,8 @@ l12cfh:
 	pop bc			;12d2
 	ei			;12d3
 	ret			;12d4
-sub_12d5h:
+ascii_to_lowercase:
+; Strips bit 7 and converts ASCII A-Z to lowercase.
 	and 07fh		;12d5
 	cp 041h		;12d7
 	ret c			;12d9
@@ -3479,38 +3545,46 @@ sub_12d5h:
 	ret nc			;12dc
 	or 020h		;12dd
 	ret			;12df
-sub_12e0h:
+print_dollar_hex_byte:
+; Prints '$' followed by A as two hexadecimal digits.
 	push af			;12e0
 	ld a,024h		;12e1
-	call sub_1304h		;12e3
+	call console_putchar_routed		;12e3
 	pop af			;12e6
-sub_12e7h:
+print_hex_byte:
+; Prints A as two hexadecimal digits.
 	push af			;12e7
 	rra			;12e8
 	rra			;12e9
 	rra			;12ea
 	rra			;12eb
-	call sub_12f0h		;12ec
+	call print_hex_nibble		;12ec
 	pop af			;12ef
-sub_12f0h:
-	call sub_12f5h		;12f0
-	jr sub_1304h		;12f3
-sub_12f5h:
+print_hex_nibble:
+; Prints the low nibble of A as one hexadecimal digit.
+	call hex_nibble_to_ascii		;12f0
+	jr console_putchar_routed		;12f3
+hex_nibble_to_ascii:
+; Converts the low nibble of A to ASCII hexadecimal.
 	and 00fh		;12f5
 	add a,090h		;12f7
 	daa			;12f9
 	adc a,040h		;12fa
 	daa			;12fc
 	ret			;12fd
-sub_12feh:
+print_space:
+; Outputs one ASCII space.
 	ld a,020h		;12fe
-	jr sub_1304h		;1300
-l1302h:
+	jr console_putchar_routed		;1300
+print_carriage_return:
+; Outputs one carriage return.
 	ld a,00dh		;1302
-sub_1304h:
+console_putchar_routed:
+; Routes character A to the active local or remote output path.
 	call sub_157bh		;1304
-	jp c,l15abh		;1307
-sub_130ah:
+	jp c,remote_putchar		;1307
+console_putchar_local:
+; Applies flow-character substitution and emits A through the local output path.
 	push hl			;130a
 	push de			;130b
 	rst 10h			;130c
@@ -3531,12 +3605,13 @@ sub_130ah:
 l1329h:
 	push af			;1329
 	ld a,(088fch)		;132a
-	call sub_1337h		;132d
+	call console_putchar_preserve_hlde		;132d
 	pop af			;1330
-	call sub_1337h		;1331
+	call console_putchar_preserve_hlde		;1331
 	ld a,e			;1334
 	jr l1355h		;1335
-sub_1337h:
+console_putchar_preserve_hlde:
+; Wrapper around local output that preserves HL and DE.
 	push hl			;1337
 	push de			;1338
 l1339h:
@@ -3544,7 +3619,7 @@ l1339h:
 	bit 7,(hl)		;133c
 	jr z,l1352h		;133e
 	ld de,(08fd6h)		;1340
-	call sub_180ch		;1344
+	call queue_put_byte		;1344
 	ei			;1347
 	ld hl,(088cfh)		;1348
 	ld de,0fff6h		;134b
@@ -3552,24 +3627,26 @@ l1339h:
 	ccf			;134f
 	jr l1355h		;1350
 l1352h:
-	call sub_123ch		;1352
+	call console_putchar		;1352
 l1355h:
 	pop de			;1355
 	pop hl			;1356
 	ret			;1357
 l1358h:
-	call sub_130ah		;1358
+	call console_putchar_local		;1358
 	ret c			;135b
-sub_135ch:
+console_puts_highbit:
+; Outputs bytes at HL through the byte with bit 7 set.
 	call sub_157bh		;135c
-	jp c,l15a3h		;135f
+	jp c,remote_puts_highbit		;135f
 	ld a,(hl)			;1362
 	inc hl			;1363
 	or a			;1364
 	jp p,l1358h		;1365
 	and 07fh		;1368
-	jp sub_130ah		;136a
-sub_136dh:
+	jp console_putchar_local		;136a
+ascii_to_uppercase:
+; Strips bit 7 and converts ASCII a-z to uppercase.
 	and 07fh		;136d
 	cp 061h		;136f
 	ret c			;1371
@@ -3577,7 +3654,8 @@ sub_136dh:
 	ret nc			;1374
 	and 05fh		;1375
 	ret			;1377
-sub_1378h:
+is_token_delimiter:
+; Returns Z for CR, space, comma, or tab.
 	and 07fh		;1378
 	cp 00dh		;137a
 	ret z			;137c
@@ -3587,16 +3665,17 @@ sub_1378h:
 	ret z			;1382
 	cp 009h		;1383
 	ret			;1385
-sub_1386h:
+terminal_rts_assert:
+; Sets SCC-B WR5 RTS and its software-state flag.
 	di			;1386
 	ld hl,083eah		;1387
-	call block_0161_end		;138a
+	call block_0135_end		;138a
 	di			;138d
 	push af			;138e
 	ld a,(080abh)		;138f
 	and 040h		;1392
 	jr z,l13a9h		;1394
-	call sub_1462h		;1396
+	call test_terminal_mode_one		;1396
 	jr c,l13a9h		;1399
 	ld a,005h		;139b
 	out (SCC_B_CTRL),a		;139d
@@ -3611,7 +3690,8 @@ l13a9h:
 	pop hl			;13af
 	pop af			;13b0
 	ret			;13b1
-sub_13b2h:
+terminal_rts_deassert:
+; Clears SCC-B WR5 RTS and its software-state flag.
 	di			;13b2
 	ld a,0ffh		;13b3
 	ld (083eah),a		;13b5
@@ -3629,10 +3709,10 @@ sub_13b2h:
 	pop hl			;13ce
 	pop af			;13cf
 	ret			;13d0
-block_0048_end:
+block_0046_end:
 
-; BLOCK 'block_0049' (start 0x13d1 end 0x13d9)
-block_0049_start:
+; BLOCK 'block_0047' (start 0x13d1 end 0x13d9)
+block_0047_start:
 	defb 0f3h		;13d1
 	defb 0f5h		;13d2
 	defb 0f1h		;13d3
@@ -3641,10 +3721,12 @@ block_0049_start:
 	defb 0f5h		;13d6
 	defb 0f1h		;13d7
 	defb 0c9h		;13d8
-block_0049_end:
+block_0047_end:
 
-; BLOCK 'block_0050' (start 0x13d9 end 0x1439)
-block_0050_start:
+; BLOCK 'block_0048' (start 0x13d9 end 0x1439)
+block_0048_start:
+; Updates SCC A and B WR5 DTR bits from configuration at 0x8091.
+update_scc_dtr_outputs:
 	di			;13d9
 	ld de,(08091h)		;13da
 	ld a,005h		;13de
@@ -3670,7 +3752,8 @@ l13ffh:
 	ld (hl),a			;13ff
 	out (SCC_A_CTRL),a		;1400
 	ret			;1402
-sub_1403h:
+test_output_path_state:
+; Returns output/session availability in flags while preserving A.
 	push hl			;1403
 	ld hl,080d5h		;1404
 	bit 0,(hl)		;1407
@@ -3684,7 +3767,8 @@ l140bh:
 l1414h:
 	pop hl			;1414
 	ret			;1415
-sub_1416h:
+test_input_or_echo_path:
+; Returns terminal/modem input or echo-path state in flags while preserving A.
 	push hl			;1416
 	ld hl,080d5h		;1417
 	bit 0,(hl)		;141a
@@ -3707,10 +3791,10 @@ l142fh:
 	ld a,l			;1436
 	pop hl			;1437
 	ret			;1438
-block_0050_end:
+block_0048_end:
 
-; BLOCK 'block_0051' (start 0x1439 end 0x1443)
-block_0051_start:
+; BLOCK 'block_0049' (start 0x1439 end 0x1443)
+block_0049_start:
 	defb 0d7h		;1439
 	defb 0c0h		;143a
 	defb 0e5h		;143b
@@ -3721,18 +3805,20 @@ block_0051_start:
 	defb 056h		;1440
 	defb 0e1h		;1441
 	defb 0c9h		;1442
-block_0051_end:
+block_0049_end:
 
-; BLOCK 'block_0052' (start 0x1443 end 0x148b)
-block_0052_start:
+; BLOCK 'block_0050' (start 0x1443 end 0x148b)
+block_0050_start:
 	push hl			;1443
 	ld hl,080aeh		;1444
 	bit 2,(hl)		;1447
 	pop hl			;1449
 	ret			;144a
-sub_144bh:
+print_u8_decimal_h:
+; Prints unsigned H in decimal.
 	ld a,h			;144b
-sub_144ch:
+print_u8_decimal:
+; Prints unsigned A in decimal without leading zeroes.
 	push hl			;144c
 	ld l,000h		;144d
 l144fh:
@@ -3742,13 +3828,14 @@ l144fh:
 	ld h,l			;1454
 	ld l,a			;1455
 	dec h			;1456
-	call nz,sub_144bh		;1457
+	call nz,print_u8_decimal_h		;1457
 	ld a,l			;145a
 	add a,03ah		;145b
-	call sub_1304h		;145d
+	call console_putchar_routed		;145d
 	pop hl			;1460
 	ret			;1461
-sub_1462h:
+test_terminal_mode_one:
+; Returns Z iff SRAM 0x80df equals one; otherwise sets carry.
 	ld a,(080dfh)		;1462
 	cp 001h		;1465
 	ret z			;1467
@@ -3757,31 +3844,32 @@ sub_1462h:
 sub_146ah:
 	call block_0041_end		;146a
 	ret c			;146d
-	call sub_026fh		;146e
+	call prepare_and_queue_output		;146e
 	ld a,(080ach)		;1471
 	and 080h		;1474
 	call nz,sub_15c6h		;1476
-sub_1479h:
+print_prompt_marker:
+; Optionally emits CR and prints the high-bit-terminated '*** ' marker.
 	call block_0041_end		;1479
 	ret c			;147c
 	rst 10h			;147d
 	ret nz			;147e
-	call block_0051_end		;147f
-	call nz,l1302h		;1482
-	ld hl,block_0052_end		;1485
-	jp sub_135ch		;1488
-block_0052_end:
+	call block_0049_end		;147f
+	call nz,print_carriage_return		;1482
+	ld hl,block_0050_end		;1485
+	jp console_puts_highbit		;1488
+block_0050_end:
 
-; BLOCK 'block_0053' (start 0x148b end 0x148f)
-block_0053_start:
+; BLOCK 'block_0051' (start 0x148b end 0x148f)
+block_0051_start:
 	defb 02ah		;148b
 	defb 02ah		;148c
 	defb 02ah		;148d
 	defb 0a0h		;148e
-block_0053_end:
+block_0051_end:
 
-; BLOCK 'block_0054' (start 0x148f end 0x14a0)
-block_0054_start:
+; BLOCK 'block_0052' (start 0x148f end 0x14a0)
+block_0052_start:
 	ld (iy+044h),a		;148f
 	ld e,05ah		;1492
 	call block_0031_end		;1494
@@ -3790,33 +3878,33 @@ block_0054_start:
 	ld (iy+045h),a		;1499
 	ld (083d9h),a		;149c
 	ret			;149f
-block_0054_end:
+block_0052_end:
 
-; BLOCK 'block_0055' (start 0x14a0 end 0x14a3)
-block_0055_start:
+; BLOCK 'block_0053' (start 0x14a0 end 0x14a3)
+block_0053_start:
 	defb 007h		;14a0
 	defb 007h		;14a1
 	defb 087h		;14a2
-block_0055_end:
+block_0053_end:
 
-; BLOCK 'block_0056' (start 0x14a3 end 0x14d9)
-block_0056_start:
+; BLOCK 'block_0054' (start 0x14a3 end 0x14d9)
+block_0054_start:
 	ld a,(080ach)		;14a3
 	and 008h		;14a6
 	ret z			;14a8
 sub_14a9h:
-	call sub_026fh		;14a9
-	ld hl,block_0054_end		;14ac
-	call sub_135ch		;14af
+	call prepare_and_queue_output		;14a9
+	ld hl,block_0052_end		;14ac
+	call console_puts_highbit		;14af
 sub_14b2h:
 	ld a,(088feh)		;14b2
-	call sub_027dh		;14b5
+	call test_nonzero_and_output_status		;14b5
 	call sub_14d0h		;14b8
 	jr nc,l14cah		;14bb
 	ld hl,(08fdah)		;14bd
 	call sub_16cah		;14c0
 	ld hl,08fd8h		;14c3
-	call sub_179ch		;14c6
+	call queue_ensure_block		;14c6
 	ei			;14c9
 l14cah:
 	ld hl,08013h		;14ca
@@ -3828,10 +3916,10 @@ sub_14d0h:
 	add hl,de			;14d6
 	ccf			;14d7
 	ret			;14d8
-block_0056_end:
+block_0054_end:
 
-; BLOCK 'block_0057' (start 0x14d9 end 0x14ef)
-block_0057_start:
+; BLOCK 'block_0055' (start 0x14d9 end 0x14ef)
+block_0055_start:
 	defb 02ah		;14d9
 	defb 0cfh		;14da
 	defb 088h		;14db
@@ -3857,15 +3945,15 @@ str_14e2_connected_to:
 	defb 074h		;14ec
 	defb 06fh		;14ed
 	defb 0a0h		;14ee
-block_0057_end:
+block_0055_end:
 
-; BLOCK 'block_0058' (start 0x14ef end 0x1516)
-block_0058_start:
+; BLOCK 'block_0056' (start 0x14ef end 0x164f)
+block_0056_start:
 	push hl			;14ef
 	ld hl,0801ch		;14f0
 	bit 1,(hl)		;14f3
 	jr nz,l1513h		;14f5
-	call block_0059_end		;14f7
+	call sub_1522h		;14f7
 	jr nc,l1514h		;14fa
 	ld l,a			;14fc
 	ld a,(080d5h)		;14fd
@@ -3885,26 +3973,14 @@ l1513h:
 l1514h:
 	pop hl			;1514
 	ret			;1515
-block_0058_end:
-
-; BLOCK 'block_0059' (start 0x1516 end 0x1522)
-block_0059_start:
-	defb 0afh		;1516
-	defb 032h		;1517
-	defb 028h		;1518
-	defb 088h		;1519
-	defb 0e5h		;151a
-	defb 021h		;151b
-	defb 01ah		;151c
-	defb 080h		;151d
-	defb 0cbh		;151e
-	defb 07eh		;151f
-	defb 018h		;1520
-	defb 027h		;1521
-block_0059_end:
-
-; BLOCK 'block_0060' (start 0x1522 end 0x164f)
-block_0060_start:
+sub_1516h:
+	xor a			;1516
+	ld (08828h),a		;1517
+	push hl			;151a
+	ld hl,0801ah		;151b
+	bit 7,(hl)		;151e
+	jr l1549h		;1520
+sub_1522h:
 	push hl			;1522
 	ld hl,0801ah		;1523
 	bit 6,(hl)		;1526
@@ -3989,21 +4065,23 @@ l158eh:
 	ld a,l			;159c
 	jr l154eh		;159d
 l159fh:
-	call l15abh		;159f
+	call remote_putchar		;159f
 	ret c			;15a2
-l15a3h:
+remote_puts_highbit:
+; Remote/session output of a high-bit-terminated string at HL.
 	ld a,(hl)			;15a3
 	inc hl			;15a4
 	or a			;15a5
 	jp p,l159fh		;15a6
 	and 07fh		;15a9
-l15abh:
+remote_putchar:
+; Queues A to the remote/session transmit descriptor, optionally mirroring locally.
 	call sub_1573h		;15ab
-	call c,sub_130ah		;15ae
+	call c,console_putchar_local		;15ae
 	push hl			;15b1
 	push de			;15b2
 	ld de,(08ff2h)		;15b3
-	call sub_180ch		;15b7
+	call queue_put_byte		;15b7
 	ei			;15ba
 	ld hl,(088cfh)		;15bb
 	ld de,0fff6h		;15be
@@ -4017,6 +4095,7 @@ sub_15c6h:
 	ld a,(hl)			;15c9
 	or a			;15ca
 	ret z			;15cb
+sub_15cch:
 	ld c,001h		;15cc
 	push bc			;15ce
 	ld a,(080ach)		;15cf
@@ -4029,8 +4108,8 @@ sub_15d7h:
 	ld a,(hl)			;15d9
 	or a			;15da
 	jr nz,l15e6h		;15db
-	ld hl,block_0060_end		;15dd
-	call sub_135ch		;15e0
+	ld hl,block_0056_end		;15dd
+	call console_puts_highbit		;15e0
 	pop hl			;15e3
 	jr l1610h		;15e4
 l15e6h:
@@ -4051,15 +4130,15 @@ l15f4h:
 	add hl,bc			;15fc
 l15fdh:
 	ld a,(hl)			;15fd
-	call sub_1304h		;15fe
+	call console_putchar_routed		;15fe
 	inc hl			;1601
 	djnz l15fdh		;1602
 	ld a,02dh		;1604
-	call sub_1304h		;1606
+	call console_putchar_routed		;1606
 	pop hl			;1609
 	inc hl			;160a
 	ld a,(hl)			;160b
-	call sub_12e7h		;160c
+	call print_hex_byte		;160c
 	dec hl			;160f
 l1610h:
 	call sub_163ah		;1610
@@ -4073,7 +4152,7 @@ l1613h:
 	jr z,l1621h		;161c
 	ld hl,l1653h		;161e
 l1621h:
-	call sub_135ch		;1621
+	call console_puts_highbit		;1621
 	jr sub_163ah		;1624
 l1626h:
 	dec hl			;1626
@@ -4088,26 +4167,26 @@ l1626h:
 	dec hl			;1635
 l1636h:
 	ld a,(hl)			;1636
-	call sub_12e7h		;1637
+	call print_hex_byte		;1637
 sub_163ah:
-	call sub_12feh		;163a
-	call sub_12feh		;163d
+	call print_space		;163a
+	call print_space		;163d
 	scf			;1640
 	ret			;1641
 sub_1642h:
 	push hl			;1642
 	push bc			;1643
 	ld a,(hl)			;1644
-	call sub_12e7h		;1645
+	call print_hex_byte		;1645
 	pop bc			;1648
 	ld a,c			;1649
-	call sub_1304h		;164a
+	call console_putchar_routed		;164a
 	pop hl			;164d
 	ret			;164e
-block_0060_end:
+block_0056_end:
 
-; BLOCK 'block_0061' (start 0x164f end 0x1658)
-block_0061_start:
+; BLOCK 'block_0057' (start 0x164f end 0x1658)
+block_0057_start:
 	defb 02eh		;164f
 l1650h:
 	defb 02eh		;1650
@@ -4119,10 +4198,10 @@ l1653h:
 	defb 02eh		;1655
 	defb 02eh		;1656
 	defb 0aeh		;1657
-block_0061_end:
+block_0057_end:
 
-; BLOCK 'block_0062' (start 0x1658 end 0x16e3)
-block_0062_start:
+; BLOCK 'block_0058' (start 0x1658 end 0x1a2b)
+block_0058_start:
 	push bc			;1658
 	push de			;1659
 	push hl			;165a
@@ -4138,7 +4217,7 @@ l1661h:
 	jr nc,l166dh		;1669
 	or 040h		;166b
 l166dh:
-	call sub_1304h		;166d
+	call console_putchar_routed		;166d
 l1670h:
 	djnz l1661h		;1670
 	ld a,(hl)			;1672
@@ -4147,9 +4226,9 @@ l1670h:
 	jr z,l1682h		;1676
 	ld b,a			;1678
 	ld a,02dh		;1679
-	call sub_1304h		;167b
+	call console_putchar_routed		;167b
 	ld a,b			;167e
-	call sub_144ch		;167f
+	call print_u8_decimal		;167f
 l1682h:
 	pop hl			;1682
 	pop de			;1683
@@ -4170,11 +4249,11 @@ sub_1686h:
 	ret nc			;1699
 	push af			;169a
 	ld a,(088fah)		;169b
-	call sub_0280h		;169e
+	call queue_output_byte_direct		;169e
 	jr c,l16abh		;16a1
 	ld a,(08820h)		;16a3
 	or 020h		;16a6
-	call sub_0280h		;16a8
+	call queue_output_byte_direct		;16a8
 l16abh:
 	pop af			;16ab
 	ret			;16ac
@@ -4193,7 +4272,7 @@ l16adh:
 	ret nc			;16c0
 	push af			;16c1
 	ld a,(088feh)		;16c2
-	call sub_0280h		;16c5
+	call queue_output_byte_direct		;16c5
 	pop af			;16c8
 	ret			;16c9
 sub_16cah:
@@ -4207,34 +4286,25 @@ sub_16cah:
 	cp h			;16d2
 	ret z			;16d3
 l16d4h:
-	call sub_1708h		;16d4
+	call list_unlink_node		;16d4
 sub_16d7h:
 	push de			;16d7
 	ld de,08fe8h		;16d8
-	call sub_16e0h		;16db
+	call list_insert_node		;16db
 	pop de			;16de
 	ret			;16df
-sub_16e0h:
+list_insert_node:
+; Inserts HL into the doubly-linked list anchored at DE.
 	push bc			;16e0
 	di			;16e1
 	ex de,hl			;16e2
-block_0062_end:
-
-; BLOCK 'block_0063' (start 0x16e3 end 0x16ea)
-block_0063_start:
-; high-bit-terminated text, ends at 0x16e9: N,Fr-sk
-str_16e3_n_fr_sk:
-	defb 04eh		;16e3
-	defb 02ch		;16e4
-	defb 046h		;16e5
-	defb 072h		;16e6
-	defb 02dh		;16e7
-	defb 073h		;16e8
-	defb 0ebh		;16e9
-block_0063_end:
-
-; BLOCK 'block_0064' (start 0x16ea end 0x16f2)
-block_0064_start:
+	ld c,(hl)			;16e3
+	inc l			;16e4
+	ld b,(hl)			;16e5
+	ld (hl),d			;16e6
+	dec l			;16e7
+	ld (hl),e			;16e8
+	ex de,hl			;16e9
 	ld (hl),c			;16ea
 	inc c			;16eb
 	inc c			;16ec
@@ -4243,26 +4313,16 @@ block_0064_start:
 	inc c			;16ef
 	ld a,h			;16f0
 	ld (bc),a			;16f1
-block_0064_end:
-
-; BLOCK 'block_0065' (start 0x16f2 end 0x16fc)
-block_0065_start:
-; high-bit-terminated text, ends at 0x16fb: ,p,s,r---A
-str_16f2_p_s_r_a:
-	defb 02ch		;16f2
-	defb 070h		;16f3
-	defb 02ch		;16f4
-	defb 073h		;16f5
-	defb 02ch		;16f6
-	defb 072h		;16f7
-	defb 02dh		;16f8
-	defb 02dh		;16f9
-	defb 02dh		;16fa
-	defb 0c1h		;16fb
-block_0065_end:
-
-; BLOCK 'block_0066' (start 0x16fc end 0x170b)
-block_0066_start:
+	inc l			;16f2
+	ld (hl),b			;16f3
+	inc l			;16f4
+	ld (hl),e			;16f5
+	inc l			;16f6
+	ld (hl),d			;16f7
+	dec l			;16f8
+	dec l			;16f9
+	dec l			;16fa
+	pop bc			;16fb
 	ret			;16fc
 sub_16fdh:
 	di			;16fd
@@ -4270,38 +4330,27 @@ sub_16fdh:
 	dec hl			;1701
 	ld (088cfh),hl		;1702
 	ld hl,(08fe4h)		;1705
-sub_1708h:
+list_unlink_node:
+; Removes HL from its doubly-linked list.
 	push bc			;1708
 	push de			;1709
 	di			;170a
-block_0066_end:
-
-; BLOCK 'block_0067' (start 0x170b end 0x171b)
-block_0067_start:
-; high-bit-terminated text, ends at 0x1715: N,F,^,V---k
-str_170b_n_f_v_k:
-	defb 04eh		;170b
-	defb 02ch		;170c
-	defb 046h		;170d
-	defb 02ch		;170e
-	defb 05eh		;170f
-	defb 02ch		;1710
-	defb 056h		;1711
-	defb 02dh		;1712
-	defb 02dh		;1713
-	defb 02dh		;1714
-	defb 0ebh		;1715
-; high-bit-terminated text, ends at 0x171a: q,p-k
-str_1716_q_p_k:
-	defb 071h		;1716
-	defb 02ch		;1717
-	defb 070h		;1718
-	defb 02dh		;1719
-	defb 0ebh		;171a
-block_0067_end:
-
-; BLOCK 'block_0068' (start 0x171b end 0x179f)
-block_0068_start:
+	ld c,(hl)			;170b
+	inc l			;170c
+	ld b,(hl)			;170d
+	inc l			;170e
+	ld e,(hl)			;170f
+	inc l			;1710
+	ld d,(hl)			;1711
+	dec l			;1712
+	dec l			;1713
+	dec l			;1714
+	ex de,hl			;1715
+	ld (hl),c			;1716
+	inc l			;1717
+	ld (hl),b			;1718
+	dec l			;1719
+	ex de,hl			;171a
 	inc c			;171b
 	inc c			;171c
 	ld a,e			;171d
@@ -4399,38 +4448,27 @@ l1765h:
 sub_178eh:
 	ld de,08fe4h		;178e
 sub_1791h:
-	call sub_16e0h		;1791
+	call list_insert_node		;1791
 	ld hl,(088cfh)		;1794
 	inc hl			;1797
 	ld (088cfh),hl		;1798
 	ret			;179b
-sub_179ch:
+queue_ensure_block:
+; Traverses or allocates and links a 32-byte queue block.
 	push hl			;179c
 	push de			;179d
 	push bc			;179e
-block_0068_end:
-
-; BLOCK 'block_0069' (start 0x179f end 0x17aa)
-block_0069_start:
-; high-bit-terminated text, ends at 0x17a3: DM,,s
-str_179f_dm_s:
-	defb 044h		;179f
-	defb 04dh		;17a0
-	defb 02ch		;17a1
-	defb 02ch		;17a2
-	defb 0f3h		;17a3
-; high-bit-terminated text, ends at 0x17a9: ^,Vbk'
-str_17a4_vbk:
-	defb 05eh		;17a4
-	defb 02ch		;17a5
-	defb 056h		;17a6
-	defb 062h		;17a7
-	defb 06bh		;17a8
-	defb 0a7h		;17a9
-block_0069_end:
-
-; BLOCK 'block_0070' (start 0x17aa end 0x1834)
-block_0070_start:
+	ld b,h			;179f
+	ld c,l			;17a0
+	inc l			;17a1
+	inc l			;17a2
+	di			;17a3
+	ld e,(hl)			;17a4
+	inc l			;17a5
+	ld d,(hl)			;17a6
+	ld h,d			;17a7
+	ld l,e			;17a8
+	and a			;17a9
 	sbc hl,bc		;17aa
 	jr z,l17beh		;17ac
 	ld hl,block_0001_end		;17ae
@@ -4447,14 +4485,14 @@ block_0070_start:
 	jr z,l17e8h		;17bc
 l17beh:
 	call sub_16fdh		;17be
-	call sub_16e0h		;17c1
+	call list_insert_node		;17c1
 l17c4h:
 	ld de,l0003h+1		;17c4
 	add hl,de			;17c7
-	call sub_18f2h		;17c8
+	call list_initialize_empty		;17c8
 	ex de,hl			;17cb
 	call sub_16fdh		;17cc
-	call sub_16e0h		;17cf
+	call list_insert_node		;17cf
 	ld bc,l0003h+1		;17d2
 	add hl,bc			;17d5
 	ex de,hl			;17d6
@@ -4478,7 +4516,8 @@ l17e8h:
 	pop de			;17e9
 	pop hl			;17ea
 	ret			;17eb
-sub_17ech:
+queue_insert_with_word:
+; Unlinks a node, stores a word, and executes the common relink path.
 	push hl			;17ec
 	push de			;17ed
 	push bc			;17ee
@@ -4489,12 +4528,14 @@ sub_17ech:
 	ld a,h			;17f5
 	ld (de),a			;17f6
 	jr l17c4h		;17f7
-sub_17f9h:
+queue_rotate_or_allocate:
+; Wrapper into the common queue block rotation/allocation path.
 	push hl			;17f9
 	push de			;17fa
 	push bc			;17fb
 	jr l17beh		;17fc
-sub_17feh:
+queue_increment_counter_and_put:
+; Increments the queue byte counter then enqueues A through DE.
 	push hl			;17fe
 	ld hl,l000ah+2		;17ff
 	add hl,de			;1802
@@ -4504,7 +4545,8 @@ sub_17feh:
 	inc l			;1807
 	inc (hl)			;1808
 	jp l180dh		;1809
-sub_180ch:
+queue_put_byte:
+; Writes A to the queue described by DE and advances its block-local pointer.
 	push hl			;180c
 l180dh:
 	push de			;180d
@@ -4521,9 +4563,9 @@ l180dh:
 	ld a,e			;181a
 	and 01fh		;181b
 	jr z,l1823h		;181d
+l181fh:
 	pop af			;181f
 	pop de			;1820
-l1821h:
 	pop hl			;1821
 	ret			;1822
 l1823h:
@@ -4532,30 +4574,21 @@ l1823h:
 	sub 020h		;1825
 	ld e,a			;1827
 	call sub_16fdh		;1828
-	call sub_16e0h		;182b
+	call list_insert_node		;182b
 	inc l			;182e
 	inc l			;182f
 	inc l			;1830
 	inc l			;1831
 	ex de,hl			;1832
 	pop hl			;1833
-block_0070_end:
-
-; BLOCK 'block_0071' (start 0x1834 end 0x1839)
-block_0071_start:
-; high-bit-terminated text, ends at 0x1838: -s,rC
-str_1834_s_rc:
-	defb 02dh		;1834
-	defb 073h		;1835
-	defb 02ch		;1836
-	defb 072h		;1837
-	defb 0c3h		;1838
-block_0071_end:
-
-; BLOCK 'block_0072' (start 0x1839 end 0x185b)
-block_0072_start:
-	rra			;1839
-	jr l1821h		;183a
+	dec l			;1834
+	ld (hl),e			;1835
+	inc l			;1836
+	ld (hl),d			;1837
+	jp l181fh		;1838
+queue_get_byte_hl:
+; Dequeues a byte from the queue described by HL.
+	push hl			;183b
 	push de			;183c
 	di			;183d
 	ld e,(hl)			;183e
@@ -4584,23 +4617,11 @@ l1853h:
 	sub 01fh		;1857
 	ld e,a			;1859
 	ex de,hl			;185a
-block_0072_end:
-
-; BLOCK 'block_0073' (start 0x185b end 0x1860)
-block_0073_start:
-; high-bit-terminated text, ends at 0x185f: N,F-M
-str_185b_n_f_m:
-	defb 04eh		;185b
-	defb 02ch		;185c
-	defb 046h		;185d
-	defb 02dh		;185e
-	defb 0cdh		;185f
-block_0073_end:
-
-; BLOCK 'block_0074' (start 0x1860 end 0x18c5)
-block_0074_start:
-	ex af,af'			;1860
-	rla			;1861
+	ld c,(hl)			;185b
+	inc l			;185c
+	ld b,(hl)			;185d
+	dec l			;185e
+	call list_unlink_node		;185f
 	call sub_178eh		;1862
 	inc c			;1865
 	inc c			;1866
@@ -4613,7 +4634,8 @@ block_0074_start:
 	pop de			;186d
 	pop bc			;186e
 	jp l184fh		;186f
-sub_1872h:
+queue_peek_byte:
+; Returns the current byte from the queue described by DE without advancing.
 	push hl			;1872
 	push de			;1873
 	ld hl,l000ah		;1874
@@ -4622,7 +4644,8 @@ sub_1872h:
 	inc l			;1879
 	ld d,(hl)			;187a
 	jr l188dh		;187b
-sub_187dh:
+queue_get_byte:
+; Dequeues one byte from the queue described by DE.
 	push hl			;187d
 	push de			;187e
 	ld hl,l000ah		;187f
@@ -4660,7 +4683,8 @@ l1891h:
 	ld (hl),e			;18a2
 	pop de			;18a3
 	jp l188dh		;18a4
-sub_18a7h:
+list_contains_equivalent_block:
+; Traverses blocks and compares metadata words for an equivalent block.
 	push bc			;18a7
 	push de			;18a8
 	push hl			;18a9
@@ -4686,22 +4710,12 @@ l18b4h:
 	cp (hl)			;18c1
 	jr nz,l18d9h		;18c2
 	ex de,hl			;18c4
-block_0074_end:
-
-; BLOCK 'block_0075' (start 0x18c5 end 0x18cb)
-block_0075_start:
-; high-bit-terminated text, ends at 0x18ca: DM^,Va
-str_18c5_dm_va:
-	defb 044h		;18c5
-	defb 04dh		;18c6
-	defb 05eh		;18c7
-	defb 02ch		;18c8
-	defb 056h		;18c9
-	defb 0e1h		;18ca
-block_0075_end:
-
-; BLOCK 'block_0076' (start 0x18cb end 0x18f3)
-block_0076_start:
+	ld b,h			;18c5
+	ld c,l			;18c6
+	ld e,(hl)			;18c7
+	inc l			;18c8
+	ld d,(hl)			;18c9
+	pop hl			;18ca
 	push hl			;18cb
 	and a			;18cc
 	sbc hl,de		;18cd
@@ -4715,7 +4729,8 @@ l18d9h:
 	pop de			;18da
 	pop bc			;18db
 	ret			;18dc
-sub_18ddh:
+list_is_empty:
+; Compares a list descriptor's first pointer with its anchor; Z means empty.
 	di			;18dd
 	ld e,(hl)			;18de
 	inc l			;18df
@@ -4728,33 +4743,26 @@ l18e6h:
 	ex de,hl			;18e6
 	call sub_16cah		;18e7
 	pop hl			;18ea
-sub_18ebh:
+list_clear:
+; Unlinks every entry and reinitializes an empty list.
 	push hl			;18eb
-	call sub_18ddh		;18ec
+	call list_is_empty		;18ec
 	jr nz,l18e6h		;18ef
 	pop hl			;18f1
-sub_18f2h:
+list_initialize_empty:
+; Writes self-referential forward and backward links at HL.
 	di			;18f2
-block_0076_end:
-
-; BLOCK 'block_0077' (start 0x18f3 end 0x18fd)
-block_0077_start:
-; high-bit-terminated text, ends at 0x18fc: }w,t,w,toI
-str_18f3_w_t_w_toi:
-	defb 07dh		;18f3
-	defb 077h		;18f4
-	defb 02ch		;18f5
-	defb 074h		;18f6
-	defb 02ch		;18f7
-	defb 077h		;18f8
-	defb 02ch		;18f9
-	defb 074h		;18fa
-	defb 06fh		;18fb
-	defb 0c9h		;18fc
-block_0077_end:
-
-; BLOCK 'block_0078' (start 0x18fd end 0x198b)
-block_0078_start:
+	ld a,l			;18f3
+	ld (hl),a			;18f4
+	inc l			;18f5
+	ld (hl),h			;18f6
+	inc l			;18f7
+	ld (hl),a			;18f8
+	inc l			;18f9
+	ld (hl),h			;18fa
+	ld l,a			;18fb
+	ret			;18fc
+sub_18fdh:
 	ld hl,l0230h		;18fd
 	ld de,08fcch		;1900
 	ld bc,l0034h		;1903
@@ -4763,28 +4771,28 @@ block_0078_start:
 	ld (088cfh),hl		;190b
 	ld hl,09000h		;190e
 	ld bc,l0360h		;1911
-	call sub_19e0h		;1914
+	call initialize_block_array		;1914
 sub_1917h:
 	ld hl,08fd8h		;1917
-	call sub_179ch		;191a
+	call queue_ensure_block		;191a
 	ld hl,08fd4h		;191d
-	call sub_179ch		;1920
+	call queue_ensure_block		;1920
 	ld hl,08fcch		;1923
-	call sub_179ch		;1926
+	call queue_ensure_block		;1926
 	ld hl,08fd0h		;1929
-	call sub_179ch		;192c
+	call queue_ensure_block		;192c
 	ld hl,08fech		;192f
-	call sub_179ch		;1932
+	call queue_ensure_block		;1932
 	ld hl,08ff0h		;1935
-	call sub_179ch		;1938
+	call queue_ensure_block		;1938
 	ret			;193b
 sub_193ch:
 	ld hl,l0230h		;193c
 	ld de,08fcch		;193f
-	ld bc,l0030h		;1942
+	ld bc,shared_pop_hl_return		;1942
 	ldir		;1945
 	ld hl,09001h		;1947
-	ld de,l0020h		;194a
+	ld de,rst20_unused_unsafe		;194a
 	ld bc,l0360h		;194d
 l1950h:
 	res 7,(hl)		;1950
@@ -4811,7 +4819,7 @@ l196bh:
 	call sub_1791h		;1977
 	pop hl			;197a
 l197bh:
-	ld de,l0020h		;197b
+	ld de,rst20_unused_unsafe		;197b
 	add hl,de			;197e
 	pop bc			;197f
 	dec bc			;1980
@@ -4823,22 +4831,13 @@ l197bh:
 	ret			;1989
 sub_198ah:
 	push hl			;198a
-block_0078_end:
-
-; BLOCK 'block_0079' (start 0x198b end 0x1990)
-block_0079_start:
-; high-bit-terminated text, ends at 0x198f: DM^#K
-str_198b_dm_k:
-	defb 044h		;198b
-	defb 04dh		;198c
-	defb 05eh		;198d
-	defb 023h		;198e
-	defb 0cbh		;198f
-block_0079_end:
-
-; BLOCK 'block_0080' (start 0x1990 end 0x19b1)
-block_0080_start:
-	cp 056h		;1990
+l198bh:
+	ld b,h			;198b
+	ld c,l			;198c
+	ld e,(hl)			;198d
+	inc hl			;198e
+	set 7,(hl)		;198f
+	ld d,(hl)			;1991
 	pop hl			;1992
 	push hl			;1993
 	and a			;1994
@@ -4863,22 +4862,13 @@ l19a8h:
 	ld hl,l0003h+1		;19ac
 	add hl,de			;19af
 	push hl			;19b0
-block_0080_end:
-
-; BLOCK 'block_0081' (start 0x19b1 end 0x19b6)
-block_0081_start:
-; high-bit-terminated text, ends at 0x19b5: DM^,K
-str_19b1_dm_k:
-	defb 044h		;19b1
-	defb 04dh		;19b2
-	defb 05eh		;19b3
-	defb 02ch		;19b4
-	defb 0cbh		;19b5
-block_0081_end:
-
-; BLOCK 'block_0082' (start 0x19b6 end 0x1a25)
-block_0082_start:
-	cp 056h		;19b6
+l19b1h:
+	ld b,h			;19b1
+	ld c,l			;19b2
+	ld e,(hl)			;19b3
+	inc l			;19b4
+	set 7,(hl)		;19b5
+	ld d,(hl)			;19b7
 	pop hl			;19b8
 	push hl			;19b9
 	and a			;19ba
@@ -4900,7 +4890,7 @@ l19ceh:
 	pop de			;19ce
 	jr nz,l19d4h		;19cf
 	ex de,hl			;19d1
-	jr block_0080_end		;19d2
+	jr l19b1h		;19d2
 l19d4h:
 	pop hl			;19d4
 	pop hl			;19d5
@@ -4911,43 +4901,45 @@ l19d6h:
 l19d9h:
 	pop hl			;19d9
 	pop hl			;19da
-	jr block_0078_end		;19db
+	jr l198bh		;19db
 l19ddh:
 	and a			;19dd
 	pop hl			;19de
 	ret			;19df
-sub_19e0h:
+initialize_block_array:
+; Adds BC consecutive 32-byte blocks beginning at HL to the free list.
 	push bc			;19e0
 	push hl			;19e1
 	ld de,(08fe6h)		;19e2
 	call sub_1791h		;19e6
 	pop hl			;19e9
-	ld de,l0020h		;19ea
+	ld de,rst20_unused_unsafe		;19ea
 	add hl,de			;19ed
 	pop bc			;19ee
 	dec bc			;19ef
 	ld a,b			;19f0
 	or c			;19f1
-	jr nz,sub_19e0h		;19f2
+	jr nz,initialize_block_array		;19f2
 	ret			;19f4
 sub_19f5h:
 	ld hl,08fe8h		;19f5
-	call sub_18ddh		;19f8
+	call list_is_empty		;19f8
 	jr z,l1a11h		;19fb
 l19fdh:
 	ex de,hl			;19fd
-	call sub_1708h		;19fe
+	call list_unlink_node		;19fe
 	ei			;1a01
 	call sub_1725h		;1a02
 	ei			;1a05
 	ld hl,08fe8h		;1a06
-	call sub_18ddh		;1a09
+	call list_is_empty		;1a09
 	jr nz,l19fdh		;1a0c
-	call sub_5882h		;1a0e
+	call update_scc_a_rts_ptt		;1a0e
 l1a11h:
 	ei			;1a11
 	ret			;1a12
-sub_1a13h:
+initialize_record_cursor:
+; Initializes cursor pointers within the record or queue described by DE.
 	push hl			;1a13
 	push bc			;1a14
 	di			;1a15
@@ -4962,26 +4954,16 @@ sub_1a13h:
 	inc c			;1a20
 	ld hl,l000ah		;1a21
 	add hl,de			;1a24
-block_0082_end:
-
-; BLOCK 'block_0083' (start 0x1a25 end 0x1a29)
-block_0083_start:
-; high-bit-terminated text, ends at 0x1a28: q,pA
-str_1a25_q_pa:
-	defb 071h		;1a25
-	defb 02ch		;1a26
-	defb 070h		;1a27
-	defb 0c1h		;1a28
-block_0083_end:
-
-; BLOCK 'block_0084' (start 0x1a29 end 0x1a2b)
-block_0084_start:
+	ld (hl),c			;1a25
+	inc l			;1a26
+	ld (hl),b			;1a27
+	pop bc			;1a28
 	pop hl			;1a29
 	ret			;1a2a
-block_0084_end:
+block_0058_end:
 
-; BLOCK 'block_0085' (start 0x1a2b end 0x22bd)
-block_0085_start:
+; BLOCK 'block_0059' (start 0x1a2b end 0x22bd)
+block_0059_start:
 	defb 0e9h		;1a2b
 l1a2ch:
 	defb 006h		;1a2c
@@ -7472,10 +7454,10 @@ str_2224_connect_disconne_converse_trans:
 	defb 010h		;22ba
 	defb 0fbh		;22bb
 	defb 0c9h		;22bc
-block_0085_end:
+block_0059_end:
 
-; BLOCK 'block_0086' (start 0x22bd end 0x2493)
-block_0086_start:
+; BLOCK 'block_0060' (start 0x22bd end 0x2493)
+block_0060_start:
 	ld hl,089f9h		;22bd
 	rst 10h			;22c0
 	jr nz,l22e0h		;22c1
@@ -7484,7 +7466,7 @@ block_0086_start:
 	inc hl			;22c8
 	ld a,(hl)			;22c9
 	dec hl			;22ca
-	call sub_136dh		;22cb
+	call ascii_to_uppercase		;22cb
 	ld (08829h),a		;22ce
 	jr l22e0h		;22d1
 l22d3h:
@@ -7533,7 +7515,7 @@ l232bh:
 	call sub_246dh		;232b
 	ld d,a			;232e
 	ld a,(hl)			;232f
-	call sub_136dh		;2330
+	call ascii_to_uppercase		;2330
 	cp d			;2333
 	jr nz,l236bh		;2334
 	inc ix		;2336
@@ -7546,7 +7528,7 @@ l232bh:
 l2343h:
 	inc hl			;2343
 	ld a,(hl)			;2344
-	call sub_1378h		;2345
+	call is_token_delimiter		;2345
 	jr z,l2352h		;2348
 	bit 7,e		;234a
 	jr z,l2327h		;234c
@@ -7563,7 +7545,7 @@ l2359h:
 l235eh:
 	push ix		;235e
 	pop hl			;2360
-	call block_0087_end		;2361
+	call block_0061_end		;2361
 	ld a,(088b9h)		;2364
 	ld (08845h),a		;2367
 	ret			;236a
@@ -7592,7 +7574,7 @@ l238ch:
 l2394h:
 	ld hl,(0883fh)		;2394
 	ld a,(ix+007h)		;2397
-	call sub_136dh		;239a
+	call ascii_to_uppercase		;239a
 	cp (hl)			;239d
 	jr nz,l23aah		;239e
 	inc hl			;23a0
@@ -7658,13 +7640,13 @@ l240bh:
 	call sub_246dh		;2411
 	ld d,a			;2414
 	ld a,(hl)			;2415
-	call sub_136dh		;2416
+	call ascii_to_uppercase		;2416
 	cp d			;2419
 	jr nz,l242ch		;241a
 	call sub_23e0h		;241c
 	push ix		;241f
 	pop hl			;2421
-	call block_0087_end		;2422
+	call block_0061_end		;2422
 	ld a,(088b9h)		;2425
 	ld (08845h),a		;2428
 	ret			;242b
@@ -7706,14 +7688,14 @@ l2462h:
 	add hl,de			;246b
 	ret			;246c
 sub_246dh:
-	jp sub_136dh		;246d
+	jp ascii_to_uppercase		;246d
 sub_2470h:
 	ld c,001h		;2470
 	ld hl,(0883fh)		;2472
 	ld de,(089f7h)		;2475
 l2479h:
 	ld a,(hl)			;2479
-	call sub_1378h		;247a
+	call is_token_delimiter		;247a
 	jr nz,l2490h		;247d
 	ld c,000h		;247f
 	cp 00dh		;2481
@@ -7726,10 +7708,10 @@ l2479h:
 l2490h:
 	rr c		;2490
 	ret			;2492
-block_0086_end:
+block_0060_end:
 
-; BLOCK 'block_0087' (start 0x2493 end 0x24a1)
-block_0087_start:
+; BLOCK 'block_0061' (start 0x2493 end 0x24a1)
+block_0061_start:
 	defb 021h		;2493
 	defb 02ch		;2494
 	defb 01ah		;2495
@@ -7744,20 +7726,20 @@ block_0087_start:
 	defb 02ah		;249e
 	defb 0c8h		;249f
 	defb 088h		;24a0
-block_0087_end:
+block_0061_end:
 
-; BLOCK 'block_0088' (start 0x24a1 end 0x24ac)
-block_0088_start:
+; BLOCK 'block_0062' (start 0x24a1 end 0x24ac)
+block_0062_start:
 	ld de,088b9h		;24a1
 	push bc			;24a4
 	ld bc,l000fh		;24a5
 	ldir		;24a8
 	pop bc			;24aa
 	ret			;24ab
-block_0088_end:
+block_0062_end:
 
-; BLOCK 'block_0089' (start 0x24ac end 0x24c3)
-block_0089_start:
+; BLOCK 'block_0063' (start 0x24ac end 0x24c3)
+block_0063_start:
 	defb 02ah		;24ac
 	defb 0c8h		;24ad
 	defb 088h		;24ae
@@ -7781,10 +7763,10 @@ block_0089_start:
 	defb 0c3h		;24c0
 	defb 05ch		;24c1
 	defb 013h		;24c2
-block_0089_end:
+block_0063_end:
 
-; BLOCK 'block_0090' (start 0x24c3 end 0x25aa)
-block_0090_start:
+; BLOCK 'block_0064' (start 0x24c3 end 0x25aa)
+block_0064_start:
 	ld hl,l1b3eh		;24c3
 	and a			;24c6
 	push af			;24c7
@@ -7811,11 +7793,11 @@ l24e6h:
 l24e8h:
 	pop af			;24e8
 	ld a,02ch		;24e9
-	call c,sub_1304h		;24eb
+	call c,console_putchar_routed		;24eb
 	scf			;24ee
 	push af			;24ef
 	ld a,(hl)			;24f0
-	call sub_1304h		;24f1
+	call console_putchar_routed		;24f1
 l24f4h:
 	ld a,(hl)			;24f4
 	cp 03fh		;24f5
@@ -7842,7 +7824,7 @@ l250ch:
 	ld c,a			;251a
 	push iy		;251b
 	ld a,(0889dh)		;251d
-	call sub_112bh		;2520
+	call select_channel_context		;2520
 	rst 18h			;2523
 	jr z,l2530h		;2524
 	call sub_2572h		;2526
@@ -7928,10 +7910,10 @@ sub_25a2h:
 	ld de,0ff70h		;25a5
 	add hl,de			;25a8
 	ret			;25a9
-block_0090_end:
+block_0064_end:
 
-; BLOCK 'block_0091' (start 0x25aa end 0x291d)
-block_0091_start:
+; BLOCK 'block_0065' (start 0x25aa end 0x291d)
+block_0065_start:
 ; high-bit-terminated text, ends at 0x25ae: CTRL-
 str_25aa_ctrl:
 	defb 043h		;25aa
@@ -8920,10 +8902,10 @@ str_288c_need_all_none_yes:
 	defb 012h		;291a
 	defb 000h		;291b
 	defb 000h		;291c
-block_0091_end:
+block_0065_end:
 
-; BLOCK 'block_0092' (start 0x291d end 0x29ca)
-block_0092_start:
+; BLOCK 'block_0066' (start 0x291d end 0x29ca)
+block_0066_start:
 	rst 10h			;291d
 	ret nz			;291e
 	ld a,(0804dh)		;291f
@@ -8988,9 +8970,9 @@ l2991h:
 sub_2992h:
 	push hl			;2992
 	ld hl,l25afh		;2993
-	call sub_135ch		;2996
+	call console_puts_highbit		;2996
 	pop hl			;2999
-	jp sub_135ch		;299a
+	jp console_puts_highbit		;299a
 sub_299dh:
 	ld a,b			;299d
 	cp c			;299e
@@ -9028,10 +9010,10 @@ sub_29b7h:
 l29c8h:
 	pop bc			;29c8
 	ret			;29c9
-block_0092_end:
+block_0066_end:
 
-; BLOCK 'block_0093' (start 0x29ca end 0x29d4)
-block_0093_start:
+; BLOCK 'block_0067' (start 0x29ca end 0x29d4)
+block_0067_start:
 	defb 02bh		;29ca
 	defb 080h		;29cb
 	defb 0dbh		;29cc
@@ -9042,15 +9024,15 @@ block_0093_start:
 	defb 080h		;29d1
 	defb 0d7h		;29d2
 	defb 080h		;29d3
-block_0093_end:
+block_0067_end:
 
-; BLOCK 'block_0094' (start 0x29d4 end 0x2a1e)
-block_0094_start:
+; BLOCK 'block_0068' (start 0x29d4 end 0x2bc3)
+block_0068_start:
 	ld a,(08831h)		;29d4
 	add a,a			;29d7
-	call c,block_0129_end		;29d8
+	call c,block_0103_end		;29d8
 	ld a,(0889dh)		;29db
-	call sub_112bh		;29de
+	call select_channel_context		;29de
 	rst 28h			;29e1
 	jp z,l2a6ch		;29e2
 	ld hl,089f9h		;29e5
@@ -9091,26 +9073,14 @@ l2a18h:
 	cp 006h		;2a19
 	ret nc			;2a1b
 	ld b,000h		;2a1c
-block_0094_end:
-
-; BLOCK 'block_0095' (start 0x2a1e end 0x2a26)
-block_0095_start:
-; high-bit-terminated text, ends at 0x2a25: \t\tN#fisC
-str_2a1e_t_tn_fisc:
-	defb 009h		;2a1e
-	defb 009h		;2a1f
-	defb 04eh		;2a20
-	defb 023h		;2a21
-	defb 066h		;2a22
-	defb 069h		;2a23
-	defb 073h		;2a24
-	defb 0c3h		;2a25
-block_0095_end:
-
-; BLOCK 'block_0096' (start 0x2a26 end 0x2b72)
-block_0096_start:
-	ld h,d			;2a26
-	ld a,(bc)			;2a27
+	add hl,bc			;2a1e
+	add hl,bc			;2a1f
+	ld c,(hl)			;2a20
+	inc hl			;2a21
+	ld h,(hl)			;2a22
+	ld l,c			;2a23
+	ld (hl),e			;2a24
+	jp update_battery_settings_checksum		;2a25
 l2a28h:
 	di			;2a28
 	call sub_2a58h		;2a29
@@ -9118,17 +9088,17 @@ l2a28h:
 	jp l2b91h		;2a2d
 l2a30h:
 	ld hl,08fd8h		;2a30
-	call sub_18a7h		;2a33
+	call list_contains_equivalent_block		;2a33
 	ei			;2a36
 	jr nz,l2a52h		;2a37
 	ld a,0c0h		;2a39
-	call sub_027dh		;2a3b
+	call test_nonzero_and_output_status		;2a3b
 	ld a,(089f9h)		;2a3e
-	call sub_1304h		;2a41
+	call console_putchar_routed		;2a41
 	ld a,(080d6h)		;2a44
 	and 008h		;2a47
 	ld a,(089f9h)		;2a49
-	call nz,sub_1304h		;2a4c
+	call nz,console_putchar_routed		;2a4c
 	call sub_14b2h		;2a4f
 l2a52h:
 	ld hl,0800eh		;2a52
@@ -9165,7 +9135,7 @@ l2a6ch:
 	ld a,004h		;2a8b
 	jr l2aeah		;2a8d
 l2a8fh:
-	call block_0085_end		;2a8f
+	call block_0059_end		;2a8f
 	ld a,(08845h)		;2a92
 	cp 0ffh		;2a95
 	jr nz,l2aa3h		;2a97
@@ -9185,7 +9155,7 @@ l2ab3h:
 	ld ix,088b9h		;2ab3
 	ld hl,(0883fh)		;2ab7
 	push hl			;2aba
-	call block_0103_end		;2abb
+	call block_0077_end		;2abb
 	pop hl			;2abe
 	ld a,(088b9h)		;2abf
 	and 007h		;2ac2
@@ -9210,7 +9180,7 @@ l2ae4h:
 l2aeah:
 	rst 10h			;2aea
 	jr z,l2af3h		;2aeb
-	call block_0099_end		;2aed
+	call block_0069_end		;2aed
 	jp l2b97h		;2af0
 l2af3h:
 	add a,a			;2af3
@@ -9223,9 +9193,9 @@ l2af3h:
 	ld d,(hl)			;2afd
 	ex de,hl			;2afe
 	ld a,03fh		;2aff
-	call sub_1304h		;2b01
-	call sub_135ch		;2b04
-	call l1302h		;2b07
+	call console_putchar_routed		;2b01
+	call console_puts_highbit		;2b04
+	call print_carriage_return		;2b07
 	jp l2b94h		;2b0a
 l2b0dh:
 	ld a,(088b9h)		;2b0d
@@ -9281,44 +9251,31 @@ l2b61h:
 	ld a,059h		;2b6d
 	jr l2b77h		;2b6f
 l2b71h:
-	defb 0cbh		;2b71
-block_0096_end:
-
-; BLOCK 'block_0097' (start 0x2b72 end 0x2b78)
-block_0097_start:
-; high-bit-terminated text, ends at 0x2b77: f(\t>WK
-str_2b72_f_t_wk:
-	defb 066h		;2b72
-	defb 028h		;2b73
-	defb 009h		;2b74
-	defb 03eh		;2b75
-	defb 057h		;2b76
+	bit 4,(hl)		;2b71
+	jr z,l2b7eh		;2b73
+	ld a,057h		;2b75
 l2b77h:
-	defb 0cbh		;2b77
-block_0097_end:
-
-; BLOCK 'block_0098' (start 0x2b78 end 0x2bc3)
-block_0098_start:
-	and (hl)			;2b78
-	call sub_10ebh		;2b79
+	res 4,(hl)		;2b77
+	call send_terminal_control_sequence		;2b79
 	jr l2b97h		;2b7c
-	call block_0115_end		;2b7e
+l2b7eh:
+	call block_0089_end		;2b7e
 	ld a,000h		;2b81
-	call l1122h		;2b83
+	call terminal_tx_enqueue_raw_ei		;2b83
 	ld a,017h		;2b86
-	call l1122h		;2b88
+	call terminal_tx_enqueue_raw_ei		;2b88
 l2b8bh:
-	call block_0111_end		;2b8b
+	call block_0085_end		;2b8b
 l2b8eh:
 	call sub_3741h		;2b8e
 l2b91h:
 	call sub_33c0h		;2b91
 l2b94h:
-	call block_0091_end		;2b94
+	call block_0065_end		;2b94
 l2b97h:
 	ei			;2b97
 	call sub_2bb4h		;2b98
-	call sub_0a62h		;2b9b
+	call update_battery_settings_checksum		;2b9b
 	call sub_1567h		;2b9e
 	jr nc,l2bb1h		;2ba1
 	rst 10h			;2ba3
@@ -9341,37 +9298,37 @@ sub_2bb4h:
 	ld (083f8h),a		;2bbf
 l2bc2h:
 	ret			;2bc2
-block_0098_end:
+block_0068_end:
 
-; BLOCK 'block_0099' (start 0x2bc3 end 0x2bc9)
-block_0099_start:
+; BLOCK 'block_0069' (start 0x2bc3 end 0x2bc9)
+block_0069_start:
 	defb 0e6h		;2bc3
 	defb 00fh		;2bc4
 	defb 0f6h		;2bc5
 	defb 030h		;2bc6
 	defb 018h		;2bc7
 	defb 022h		;2bc8
-block_0099_end:
+block_0069_end:
 
-; BLOCK 'block_0100' (start 0x2bc9 end 0x2c37)
-block_0100_start:
+; BLOCK 'block_0070' (start 0x2bc9 end 0x2c37)
+block_0070_start:
 	push af			;2bc9
 	call sub_2bd7h		;2bca
 	pop af			;2bcd
-	call sub_1108h		;2bce
+	call queue_escaped_control_byte		;2bce
 	ei			;2bd1
 	ld a,017h		;2bd2
-	jp l1122h		;2bd4
+	jp terminal_tx_enqueue_raw_ei		;2bd4
 sub_2bd7h:
 	ld a,001h		;2bd7
-	call l1122h		;2bd9
+	call terminal_tx_enqueue_raw_ei		;2bd9
 	ld a,04fh		;2bdc
-	call l1122h		;2bde
+	call terminal_tx_enqueue_raw_ei		;2bde
 	ld a,(089f9h)		;2be1
-	call sub_1108h		;2be4
+	call queue_escaped_control_byte		;2be4
 	ei			;2be7
 	ld a,(089fah)		;2be8
-	call sub_1108h		;2beb
+	call queue_escaped_control_byte		;2beb
 	ei			;2bee
 	ret			;2bef
 l2bf0h:
@@ -9379,7 +9336,7 @@ l2bf0h:
 	ld hl,08a79h		;2bf3
 	ld (08845h),hl		;2bf6
 	ld a,(088b7h)		;2bf9
-	ld hl,block_0100_end		;2bfc
+	ld hl,block_0070_end		;2bfc
 	call sub_1567h		;2bff
 	jr nc,l2c1dh		;2c02
 	call sub_1563h		;2c04
@@ -9392,14 +9349,14 @@ l2c12h:
 	bit 2,(ix+002h)		;2c12
 	jr nz,l2c21h		;2c16
 l2c18h:
-	call block_0135_end		;2c18
+	call block_0107_end		;2c18
 	jr l2c34h		;2c1b
 l2c1dh:
 	cp 016h		;2c1d
 	jr c,l2c28h		;2c1f
 l2c21h:
 	sub 016h		;2c21
-	call sub_3f32h		;2c23
+	call mailbox_command_table_lookup		;2c23
 	jr l2c2bh		;2c26
 l2c28h:
 	call sub_310bh		;2c28
@@ -9407,13 +9364,13 @@ l2c2bh:
 	call block_0037_end		;2c2b
 	rst 10h			;2c2e
 	ld a,000h		;2c2f
-	call nz,block_0099_end		;2c31
+	call nz,block_0069_end		;2c31
 l2c34h:
 	jp l2b94h		;2c34
-block_0100_end:
+block_0070_end:
 
-; BLOCK 'block_0101' (start 0x2c37 end 0x3001)
-block_0101_start:
+; BLOCK 'block_0071' (start 0x2c37 end 0x2f37)
+block_0071_start:
 	defb 09ch		;2c37
 	defb 02fh		;2c38
 	defb 06eh		;2c39
@@ -10190,52 +10147,41 @@ str_2c54_n_n_n_b:
 	defb 032h		;2f34
 	defb 008h		;2f35
 	defb 080h		;2f36
-	defb 03ah		;2f37
-	defb 005h		;2f38
-	defb 080h		;2f39
-	defb 0b7h		;2f3a
-	defb 0c8h		;2f3b
-	defb 047h		;2f3c
-	defb 021h		;2f3d
-	defb 003h		;2f3e
-	defb 089h		;2f3f
-	defb 0c5h		;2f40
-	defb 0cdh		;2f41
-	defb 04fh		;2f42
-	defb 02fh		;2f43
-	defb 0cdh		;2f44
-	defb 002h		;2f45
-	defb 013h		;2f46
-	defb 0c1h		;2f47
-	defb 011h		;2f48
-	defb 005h		;2f49
-	defb 000h		;2f4a
-	defb 019h		;2f4b
-	defb 010h		;2f4c
-	defb 0f2h		;2f4d
-	defb 0c9h		;2f4e
-	defb 0e5h		;2f4f
-	defb 0cdh		;2f50
-	defb 0cch		;2f51
-	defb 015h		;2f52
-	defb 0e1h		;2f53
-	defb 011h		;2f54
-	defb 008h		;2f55
-	defb 000h		;2f56
-	defb 019h		;2f57
-	defb 0cdh		;2f58
-	defb 058h		;2f59
-	defb 016h		;2f5a
-	defb 0e5h		;2f5b
-	defb 0cbh		;2f5c
-	defb 046h		;2f5d
-	defb 03eh		;2f5e
-	defb 02ah		;2f5f
-	defb 0c4h		;2f60
-	defb 004h		;2f61
-	defb 013h		;2f62
-	defb 0e1h		;2f63
-	defb 0c9h		;2f64
+block_0071_end:
+
+; BLOCK 'block_0072' (start 0x2f37 end 0x2f65)
+block_0072_start:
+	ld a,(08005h)		;2f37
+	or a			;2f3a
+	ret z			;2f3b
+	ld b,a			;2f3c
+	ld hl,08903h		;2f3d
+l2f40h:
+	push bc			;2f40
+	call sub_2f4fh		;2f41
+	call print_carriage_return		;2f44
+	pop bc			;2f47
+	ld de,l0003h+2		;2f48
+	add hl,de			;2f4b
+	djnz l2f40h		;2f4c
+	ret			;2f4e
+sub_2f4fh:
+	push hl			;2f4f
+	call sub_15cch		;2f50
+	pop hl			;2f53
+	ld de,block_0001_end		;2f54
+	add hl,de			;2f57
+	call block_0057_end		;2f58
+	push hl			;2f5b
+	bit 0,(hl)		;2f5c
+	ld a,02ah		;2f5e
+	call nz,console_putchar_routed		;2f60
+	pop hl			;2f63
+	ret			;2f64
+block_0072_end:
+
+; BLOCK 'block_0073' (start 0x2f65 end 0x3001)
+block_0073_start:
 	defb 0cdh		;2f65
 	defb 07fh		;2f66
 	defb 030h		;2f67
@@ -10392,13 +10338,13 @@ str_2c54_n_n_n_b:
 	defb 08eh		;2ffe
 	defb 022h		;2fff
 	defb 0c9h		;3000
-block_0101_end:
+block_0073_end:
 
-; BLOCK 'block_0102' (start 0x3001 end 0x302e)
-block_0102_start:
+; BLOCK 'block_0074' (start 0x3001 end 0x302e)
+block_0074_start:
 	ld hl,08fcch		;3001
-	call sub_18ebh		;3004
-	call sub_179ch		;3007
+	call list_clear		;3004
+	call queue_ensure_block		;3007
 	ld hl,block_0000_start		;300a
 	ld (088a9h),hl		;300d
 	ld hl,(08ffah)		;3010
@@ -10413,11 +10359,11 @@ l301dh:
 	ld (08845h),hl		;3023
 	ld a,(088b7h)		;3026
 	sub 016h		;3029
-	jp sub_3f32h		;302b
-block_0102_end:
+	jp mailbox_command_table_lookup		;302b
+block_0074_end:
 
-; BLOCK 'block_0103' (start 0x302e end 0x30d6)
-block_0103_start:
+; BLOCK 'block_0075' (start 0x302e end 0x30a4)
+block_0075_start:
 	defb 021h		;302e
 	defb 01dh		;302f
 	defb 080h		;3030
@@ -10536,10 +10482,16 @@ block_0103_start:
 	defb 011h		;30a1
 	defb 03eh		;30a2
 	defb 005h		;30a3
-	defb 0d1h		;30a4
-	defb 0c3h		;30a5
-	defb 0eah		;30a6
-	defb 02ah		;30a7
+block_0075_end:
+
+; BLOCK 'block_0076' (start 0x30a4 end 0x30a8)
+block_0076_start:
+	pop de			;30a4
+	jp l2aeah		;30a5
+block_0076_end:
+
+; BLOCK 'block_0077' (start 0x30a8 end 0x30d6)
+block_0077_start:
 	defb 0d1h		;30a8
 	defb 0c3h		;30a9
 	defb 0eah		;30aa
@@ -10589,10 +10541,10 @@ str_30c5_b_x_w:
 	defb 027h		;30d3
 	defb 07fh		;30d4
 	defb 026h		;30d5
-block_0103_end:
+block_0077_end:
 
-; BLOCK 'block_0104' (start 0x30d6 end 0x3110)
-block_0104_start:
+; BLOCK 'block_0078' (start 0x30d6 end 0x3115)
+block_0078_start:
 	ld hl,08a79h		;30d6
 	ld (08845h),hl		;30d9
 	ld hl,block_0000_start		;30dc
@@ -10614,27 +10566,24 @@ l30f7h:
 	inc (hl)			;30fb
 	ld a,(0801dh)		;30fc
 	and 002h		;30ff
-	jr nz,block_0107_end		;3101
+	jr nz,block_0081_end		;3101
 	ld a,(088b9h)		;3103
 	and 007h		;3106
-	ld hl,l3115h		;3108
+	ld hl,block_0078_end		;3108
 sub_310bh:
 	ld e,a			;310b
 	ld d,000h		;310c
 	add hl,de			;310e
 	add hl,de			;310f
-block_0104_end:
+	ld e,(hl)			;3110
+	inc hl			;3111
+	ld h,(hl)			;3112
+	ld l,e			;3113
+	jp (hl)			;3114
+block_0078_end:
 
-; BLOCK 'block_0105' (start 0x3110 end 0x3158)
-block_0105_start:
-; high-bit-terminated text, ends at 0x3114: ^#fki
-str_3110_fki:
-	defb 05eh		;3110
-	defb 023h		;3111
-	defb 066h		;3112
-	defb 06bh		;3113
-	defb 0e9h		;3114
-l3115h:
+; BLOCK 'block_0079' (start 0x3115 end 0x3158)
+block_0079_start:
 	defb 025h		;3115
 	defb 031h		;3116
 	defb 014h		;3117
@@ -10702,16 +10651,16 @@ l3115h:
 	defb 006h		;3155
 	defb 03eh		;3156
 	defb 001h		;3157
-block_0105_end:
+block_0079_end:
 
-; BLOCK 'block_0106' (start 0x3158 end 0x315c)
-block_0106_start:
+; BLOCK 'block_0080' (start 0x3158 end 0x315c)
+block_0080_start:
 	ld (08842h),a		;3158
 	ret			;315b
-block_0106_end:
+block_0080_end:
 
-; BLOCK 'block_0107' (start 0x315c end 0x3165)
-block_0107_start:
+; BLOCK 'block_0081' (start 0x315c end 0x3165)
+block_0081_start:
 	defb 02ah		;315c
 	defb 0bbh		;315d
 	defb 088h		;315e
@@ -10721,15 +10670,15 @@ block_0107_start:
 	defb 088h		;3162
 	defb 077h		;3163
 	defb 0c9h		;3164
-block_0107_end:
+block_0081_end:
 
-; BLOCK 'block_0108' (start 0x3165 end 0x3214)
-block_0108_start:
+; BLOCK 'block_0082' (start 0x3165 end 0x3214)
+block_0082_start:
 	ld a,(088bbh)		;3165
 	ld hl,08841h		;3168
 	cp (hl)			;316b
 	ld a,002h		;316c
-	jr c,block_0105_end		;316e
+	jr c,block_0079_end		;316e
 	ld hl,(088b9h)		;3170
 	bit 5,l		;3173
 	jr z,l31dfh		;3175
@@ -10756,7 +10705,7 @@ l3196h:
 	cp 00dh		;31a1
 	jr nz,l31d9h		;31a3
 	ld a,003h		;31a5
-	jr block_0105_end		;31a7
+	jr block_0079_end		;31a7
 l31a9h:
 	ld hl,l2787h		;31a9
 	call sub_39d1h		;31ac
@@ -10768,8 +10717,8 @@ l31a9h:
 	ld a,(088b9h)		;31ba
 	bit 6,a		;31bd
 	ld a,011h		;31bf
-	jr nz,block_0105_end		;31c1
-	call block_0109_end		;31c3
+	jr nz,block_0079_end		;31c1
+	call block_0083_end		;31c3
 	jr l31dfh		;31c6
 l31c8h:
 	ld hl,(0883fh)		;31c8
@@ -10781,7 +10730,7 @@ l31c8h:
 	ld a,002h		;31d5
 	jr nz,l3211h		;31d7
 l31d9h:
-	call block_0109_end		;31d9
+	call block_0083_end		;31d9
 	jp l30f2h		;31dc
 l31dfh:
 	ld a,(088b7h)		;31df
@@ -10803,18 +10752,18 @@ l31fdh:
 	ld de,0806eh		;3201
 l3204h:
 	ld hl,08a7fh		;3204
-	call sub_6ab1h		;3207
+	call ax25_callsign_compare		;3207
 	jr z,l320fh		;320a
 l320ch:
 	jp l30f2h		;320c
 l320fh:
 	ld a,006h		;320f
 l3211h:
-	jp block_0105_end		;3211
-block_0108_end:
+	jp block_0079_end		;3211
+block_0082_end:
 
-; BLOCK 'block_0109' (start 0x3214 end 0x3331)
-block_0109_start:
+; BLOCK 'block_0083' (start 0x3214 end 0x3331)
+block_0083_start:
 	defb 021h		;3214
 	defb 07bh		;3215
 	defb 026h		;3216
@@ -11102,10 +11051,10 @@ str_32e8_e_vk:
 	defb 0c3h		;332e
 	defb 056h		;332f
 	defb 031h		;3330
-block_0109_end:
+block_0083_end:
 
-; BLOCK 'block_0110' (start 0x3331 end 0x3382)
-block_0110_start:
+; BLOCK 'block_0084' (start 0x3331 end 0x3382)
+block_0084_start:
 	ld a,b			;3331
 	ld hl,(08845h)		;3332
 	ld (hl),a			;3335
@@ -11144,17 +11093,17 @@ sub_3367h:
 	jr sub_3367h		;3372
 sub_3374h:
 	and 007h		;3374
-	ld hl,block_0110_end		;3376
+	ld hl,block_0084_end		;3376
 	ld d,000h		;3379
 	ld e,a			;337b
 	add hl,de			;337c
 	ld a,(hl)			;337d
 	ld (088bbh),a		;337e
 	ret			;3381
-block_0110_end:
+block_0084_end:
 
-; BLOCK 'block_0111' (start 0x3382 end 0x33b2)
-block_0111_start:
+; BLOCK 'block_0085' (start 0x3382 end 0x33b2)
+block_0085_start:
 	defb 001h		;3382
 	defb 002h		;3383
 	defb 004h		;3384
@@ -11203,37 +11152,37 @@ block_0111_start:
 	defb 03eh		;33af
 	defb 005h		;33b0
 	defb 0c9h		;33b1
-block_0111_end:
+block_0085_end:
 
-; BLOCK 'block_0112' (start 0x33b2 end 0x33ff)
-block_0112_start:
+; BLOCK 'block_0086' (start 0x33b2 end 0x33ff)
+block_0086_start:
 	rst 10h			;33b2
 	ret nz			;33b3
-	call block_0051_end		;33b4
+	call block_0049_end		;33b4
 	ret nz			;33b7
-	call block_0115_end		;33b8
+	call block_0089_end		;33b8
 	ld hl,l2688h		;33bb
 	jr l33cch		;33be
 sub_33c0h:
 	rst 10h			;33c0
 	ret nz			;33c1
-	call block_0051_end		;33c2
+	call block_0049_end		;33c2
 	ret nz			;33c5
-	call block_0115_end		;33c6
+	call block_0089_end		;33c6
 	ld hl,l268ch		;33c9
 l33cch:
-	call sub_135ch		;33cc
+	call console_puts_highbit		;33cc
 	jr l33deh		;33cf
 sub_33d1h:
-	call block_0113_end		;33d1
+	call block_0087_end		;33d1
 	ld a,(088b9h)		;33d4
 	and 007h		;33d7
 	cp 006h		;33d9
-	call nz,block_0115_end		;33db
+	call nz,block_0089_end		;33db
 l33deh:
 	ld a,(088b9h)		;33de
 	and 007h		;33e1
-	ld hl,block_0112_end		;33e3
+	ld hl,block_0086_end		;33e3
 	call sub_310bh		;33e6
 	call sub_3590h		;33e9
 	rst 10h			;33ec
@@ -11241,15 +11190,15 @@ l33deh:
 	ld a,(088b9h)		;33ef
 	and 067h		;33f2
 	cp 003h		;33f4
-	call nz,l1302h		;33f6
+	call nz,print_carriage_return		;33f6
 	ret			;33f9
 l33fah:
 	ld a,017h		;33fa
-	jp l1122h		;33fc
-block_0112_end:
+	jp terminal_tx_enqueue_raw_ei		;33fc
+block_0086_end:
 
-; BLOCK 'block_0113' (start 0x33ff end 0x3588)
-block_0113_start:
+; BLOCK 'block_0087' (start 0x33ff end 0x3588)
+block_0087_start:
 	defb 00fh		;33ff
 	defb 034h		;3400
 	defb 027h		;3401
@@ -11645,10 +11594,10 @@ str_354e_fkm:
 	defb 026h		;3585
 	defb 0dah		;3586
 	defb 026h		;3587
-block_0113_end:
+block_0087_end:
 
-; BLOCK 'block_0114' (start 0x3588 end 0x3596)
-block_0114_start:
+; BLOCK 'block_0088' (start 0x3588 end 0x3596)
+block_0088_start:
 	rst 10h			;3588
 	ret z			;3589
 	ld hl,08012h		;358a
@@ -11658,10 +11607,10 @@ sub_3590h:
 	ld hl,08012h		;3590
 	res 7,(hl)		;3593
 	ret			;3595
-block_0114_end:
+block_0088_end:
 
-; BLOCK 'block_0115' (start 0x3596 end 0x359e)
-block_0115_start:
+; BLOCK 'block_0089' (start 0x3596 end 0x359e)
+block_0089_start:
 	defb 0cdh		;3596
 	defb 0feh		;3597
 	defb 012h		;3598
@@ -11670,28 +11619,28 @@ block_0115_start:
 	defb 0c3h		;359b
 	defb 004h		;359c
 	defb 013h		;359d
-block_0115_end:
+block_0089_end:
 
-; BLOCK 'block_0116' (start 0x359e end 0x3600)
-block_0116_start:
+; BLOCK 'block_0090' (start 0x359e end 0x3600)
+block_0090_start:
 	push ix		;359e
 	pop hl			;35a0
 	rst 10h			;35a1
 	jr z,l35c1h		;35a2
 	ld a,001h		;35a4
-	call l1122h		;35a6
+	call terminal_tx_enqueue_raw_ei		;35a6
 	ld a,04fh		;35a9
-	call l1122h		;35ab
+	call terminal_tx_enqueue_raw_ei		;35ab
 	rst 10h			;35ae
 	jr z,l35c1h		;35af
 	ld bc,l0007h		;35b1
 	add hl,bc			;35b4
 	ld a,(hl)			;35b5
-	call block_0125_end		;35b6
-	call l1122h		;35b9
+	call block_0099_end		;35b6
+	call terminal_tx_enqueue_raw_ei		;35b9
 	dec hl			;35bc
 	ld a,(hl)			;35bd
-	jp l1122h		;35be
+	jp terminal_tx_enqueue_raw_ei		;35be
 l35c1h:
 	ld bc,l0007h		;35c1
 	add hl,bc			;35c4
@@ -11699,7 +11648,7 @@ l35c1h:
 l35c7h:
 	ld a,(hl)			;35c7
 	and 07fh		;35c8
-	call sub_1304h		;35ca
+	call console_putchar_routed		;35ca
 	ld a,(hl)			;35cd
 	rla			;35ce
 	jr c,l35d4h		;35cf
@@ -11710,29 +11659,29 @@ l35d4h:
 	and 047h		;35d7
 	cp 040h		;35d9
 	jr nz,l35ebh		;35db
-	call sub_12feh		;35dd
+	call print_space		;35dd
 	ld a,(080d4h)		;35e0
 	call sub_35f1h		;35e3
-	call sub_144ch		;35e6
+	call print_u8_decimal		;35e6
 	ld b,002h		;35e9
 l35ebh:
-	call sub_12feh		;35eb
+	call print_space		;35eb
 	djnz l35ebh		;35ee
 	ret			;35f0
 sub_35f1h:
 	push af			;35f1
 	cp 064h		;35f2
-	call c,sub_12feh		;35f4
+	call c,print_space		;35f4
 	pop af			;35f7
 	push af			;35f8
 	cp 00ah		;35f9
-	call c,sub_12feh		;35fb
+	call c,print_space		;35fb
 	pop af			;35fe
 	ret			;35ff
-block_0116_end:
+block_0090_end:
 
-; BLOCK 'block_0117' (start 0x3600 end 0x3703)
-block_0117_start:
+; BLOCK 'block_0091' (start 0x3600 end 0x3703)
+block_0091_start:
 	defb 07eh		;3600
 	defb 0b7h		;3601
 	defb 0c8h		;3602
@@ -11992,19 +11941,19 @@ block_0117_start:
 	defb 0c3h		;3700
 	defb 05ch		;3701
 	defb 013h		;3702
-block_0117_end:
+block_0091_end:
 
-; BLOCK 'block_0118' (start 0x3703 end 0x370f)
-block_0118_start:
+; BLOCK 'block_0092' (start 0x3703 end 0x370f)
+block_0092_start:
 	ld a,02ch		;3703
-	call sub_1304h		;3705
-	call block_0051_end		;3708
-	call z,sub_12feh		;370b
+	call console_putchar_routed		;3705
+	call block_0049_end		;3708
+	call z,print_space		;370b
 	ret			;370e
-block_0118_end:
+block_0092_end:
 
-; BLOCK 'block_0119' (start 0x370f end 0x3722)
-block_0119_start:
+; BLOCK 'block_0093' (start 0x370f end 0x3722)
+block_0093_start:
 	defb 0fdh		;370f
 	defb 0e5h		;3710
 	defb 0e1h		;3711
@@ -12024,27 +11973,27 @@ block_0119_start:
 	defb 0b7h		;371f
 	defb 0c8h		;3720
 	defb 019h		;3721
-block_0119_end:
+block_0093_end:
 
-; BLOCK 'block_0120' (start 0x3722 end 0x395d)
-block_0120_start:
+; BLOCK 'block_0094' (start 0x3722 end 0x395d)
+block_0094_start:
 	push hl			;3722
 	push de			;3723
 	ld hl,l277dh		;3724
-	call block_0051_end		;3727
+	call block_0049_end		;3727
 	jr z,l372fh		;372a
 	ld hl,l2782h		;372c
 l372fh:
-	call sub_135ch		;372f
+	call console_puts_highbit		;372f
 	pop de			;3732
 	pop hl			;3733
 l3734h:
-	call block_0061_end		;3734
+	call block_0057_end		;3734
 	inc hl			;3737
 	ld a,(hl)			;3738
 	or a			;3739
 	ret z			;373a
-	call block_0117_end		;373b
+	call block_0091_end		;373b
 	add hl,de			;373e
 	jr l3734h		;373f
 sub_3741h:
@@ -12138,7 +12087,7 @@ l37c4h:
 	cp 02dh		;37d3
 	jr nz,l37dah		;37d5
 l37d7h:
-	call sub_0871h		;37d7
+	call calculate_and_program_terminal_brg		;37d7
 l37dah:
 	ei			;37da
 	ret			;37db
@@ -12188,7 +12137,7 @@ l3824h:
 l382ch:
 	ld (08091h),a		;382c
 l382fh:
-	call block_0049_end		;382f
+	call block_0047_end		;382f
 	ei			;3832
 	ret			;3833
 l3834h:
@@ -12229,7 +12178,7 @@ l3863h:
 	set 6,(hl)		;3880
 	ld b,(hl)			;3882
 	ld c,0c1h		;3883
-	call sub_0993h		;3885
+	call write_scc_a_wr3_wr5		;3885
 l3888h:
 	ei			;3888
 	ret			;3889
@@ -12264,18 +12213,19 @@ sub_38b0h:
 	jp nz,l393ch		;38b9
 l38bch:
 	ld c,000h		;38bc
+sub_38beh:
 	ld b,006h		;38be
 	ld hl,(0883fh)		;38c0
 	ld de,(08845h)		;38c3
 	ld a,(hl)			;38c7
-	call sub_136dh		;38c8
+	call ascii_to_uppercase		;38c8
 	jr l38dah		;38cb
 l38cdh:
 	ld a,(hl)			;38cd
-	call sub_136dh		;38ce
+	call ascii_to_uppercase		;38ce
 	cp 02dh		;38d1
 	jr z,l3903h		;38d3
-	call sub_1378h		;38d5
+	call is_token_delimiter		;38d5
 	jr z,l3903h		;38d8
 l38dah:
 	cp 030h		;38da
@@ -12314,7 +12264,7 @@ l390dh:
 	bit 1,c		;390d
 	jr nz,l3917h		;390f
 	ld a,(hl)			;3911
-	call sub_1378h		;3912
+	call is_token_delimiter		;3912
 	jr nz,l391bh		;3915
 l3917h:
 	ld a,060h		;3917
@@ -12325,9 +12275,9 @@ l391bh:
 	ret nz			;391e
 	inc hl			;391f
 	ld (0883fh),hl		;3920
-	call block_0123_end		;3923
+	call block_0097_end		;3923
 	ret c			;3926
-	call block_0121_end		;3927
+	call block_0095_end		;3927
 	ret c			;392a
 	cp 010h		;392b
 	ccf			;392d
@@ -12358,18 +12308,18 @@ sub_3943h:
 	ret z			;3959
 	cp 026h		;395a
 	ret			;395c
-block_0120_end:
+block_0094_end:
 
-; BLOCK 'block_0121' (start 0x395d end 0x3961)
-block_0121_start:
+; BLOCK 'block_0095' (start 0x395d end 0x3961)
+block_0095_start:
 	defb 0cdh		;395d
 	defb 06ch		;395e
 	defb 039h		;395f
 	defb 0d8h		;3960
-block_0121_end:
+block_0095_end:
 
-; BLOCK 'block_0122' (start 0x3961 end 0x396c)
-block_0122_start:
+; BLOCK 'block_0096' (start 0x3961 end 0x396c)
+block_0096_start:
 	ld (0883fh),de		;3961
 	inc h			;3965
 	dec h			;3966
@@ -12378,10 +12328,10 @@ block_0122_start:
 	ld a,l			;3969
 	and a			;396a
 	ret			;396b
-block_0122_end:
+block_0096_end:
 
-; BLOCK 'block_0123' (start 0x396c end 0x3974)
-block_0123_start:
+; BLOCK 'block_0097' (start 0x396c end 0x3974)
+block_0097_start:
 	defb 02ah		;396c
 	defb 03fh		;396d
 	defb 088h		;396e
@@ -12390,15 +12340,15 @@ block_0123_start:
 	defb 024h		;3971
 	defb 028h		;3972
 	defb 01ch		;3973
-block_0123_end:
+block_0097_end:
 
-; BLOCK 'block_0124' (start 0x3974 end 0x3990)
-block_0124_start:
+; BLOCK 'block_0098' (start 0x3974 end 0x3990)
+block_0098_start:
 	ld de,(0883fh)		;3974
 	ld hl,block_0000_start		;3978
 l397bh:
 	ld a,(de)			;397b
-	call sub_1378h		;397c
+	call is_token_delimiter		;397c
 	ret z			;397f
 	sub 030h		;3980
 	cp 00ah		;3982
@@ -12410,10 +12360,10 @@ l397bh:
 	ld b,000h		;398b
 	add hl,bc			;398d
 	jr l397bh		;398e
-block_0124_end:
+block_0098_end:
 
-; BLOCK 'block_0125' (start 0x3990 end 0x39bb)
-block_0125_start:
+; BLOCK 'block_0099' (start 0x3990 end 0x39bb)
+block_0099_start:
 	defb 023h		;3990
 	defb 022h		;3991
 	defb 03fh		;3992
@@ -12457,16 +12407,16 @@ block_0125_start:
 	defb 013h		;39b8
 	defb 018h		;39b9
 	defb 0ddh		;39ba
-block_0125_end:
+block_0099_end:
 
-; BLOCK 'block_0126' (start 0x39bb end 0x3a0e)
-block_0126_start:
-	jp sub_136dh		;39bb
+; BLOCK 'block_0100' (start 0x39bb end 0x3a0e)
+block_0100_start:
+	jp ascii_to_uppercase		;39bb
 sub_39beh:
 	ld de,(0883fh)		;39be
 l39c2h:
 	ld a,(de)			;39c2
-	call sub_136dh		;39c3
+	call ascii_to_uppercase		;39c3
 	ld c,a			;39c6
 	ld a,(hl)			;39c7
 	and 07fh		;39c8
@@ -12479,7 +12429,7 @@ l39c2h:
 sub_39d1h:
 	ld de,(0883fh)		;39d1
 	ld a,(de)			;39d5
-	call sub_136dh		;39d6
+	call ascii_to_uppercase		;39d6
 l39d9h:
 	ld c,a			;39d9
 	ld a,(hl)			;39da
@@ -12489,8 +12439,8 @@ l39d9h:
 	inc hl			;39df
 	inc de			;39e0
 	ld a,(de)			;39e1
-	call sub_136dh		;39e2
-	call sub_1378h		;39e5
+	call ascii_to_uppercase		;39e2
+	call is_token_delimiter		;39e5
 	jr nz,l39d9h		;39e8
 	ret			;39ea
 sub_39ebh:
@@ -12499,7 +12449,7 @@ sub_39ebh:
 	ld de,(089f7h)		;39f0
 l39f4h:
 	ld a,(hl)			;39f4
-	call sub_1378h		;39f5
+	call is_token_delimiter		;39f5
 	jr nz,l3a0bh		;39f8
 	ld c,000h		;39fa
 	cp 00dh		;39fc
@@ -12512,10 +12462,10 @@ l39f4h:
 l3a0bh:
 	rr c		;3a0b
 	ret			;3a0d
-block_0126_end:
+block_0100_end:
 
-; BLOCK 'block_0127' (start 0x3a0e end 0x3c27)
-block_0127_start:
+; BLOCK 'block_0101' (start 0x3a0e end 0x3c27)
+block_0101_start:
 	defb 0cdh		;3a0e
 	defb 033h		;3a0f
 	defb 03ah		;3a10
@@ -13054,101 +13004,105 @@ l3b60h:
 	defb 0c3h		;3c24
 	defb 0b2h		;3c25
 	defb 013h		;3c26
-block_0127_end:
+block_0101_end:
 
-; BLOCK 'block_0128' (start 0x3c27 end 0x3ce5)
-block_0128_start:
-	call sub_4bfeh		;3c27
-	call block_0129_end		;3c2a
+; BLOCK 'block_0102' (start 0x3c27 end 0x3ce5)
+block_0102_start:
+; Initializes mailbox state and emits the banner, free-space count, mail notice, and prompt.
+mailbox_session_enter:
+	call mailbox_abort_pending_storage		;3c27
+	call block_0103_end		;3c2a
 	rst 10h			;3c2d
 	ret nz			;3c2e
 	ld hl,block_0000_start		;3c2f
 	ld (089f7h),hl		;3c32
 l3c35h:
-	call block_0137_end		;3c35
+	call block_0109_end		;3c35
 	jr nc,l3c4fh		;3c38
 	ld hl,0801ch		;3c3a
 	bit 5,(hl)		;3c3d
 	jr z,l3c49h		;3c3f
 	res 5,(hl)		;3c41
-	ld hl,block_0128_end		;3c43
-	jp block_0139_end		;3c46
+	ld hl,block_0102_end		;3c43
+	jp l4471h		;3c46
 l3c49h:
 	ld hl,l3cf4h		;3c49
-	jp block_0139_end		;3c4c
+	jp l4471h		;3c4c
 l3c4fh:
 	ld hl,0801ch		;3c4f
 	bit 5,(hl)		;3c52
 	jr z,l3c86h		;3c54
 	ld hl,08ffch		;3c56
 	ld (0882ah),hl		;3c59
-	call sub_18ddh		;3c5c
+	call list_is_empty		;3c5c
 	ei			;3c5f
 	jr z,l3c86h		;3c60
 	call sub_153fh		;3c62
 	jr c,l3c73h		;3c65
 l3c67h:
-	call sub_45d4h		;3c67
+	call message_next_record		;3c67
 	jr z,l3c86h		;3c6a
-	call sub_488eh		;3c6c
+	call message_matches_local_identities		;3c6c
 	jr nc,l3c67h		;3c6f
 	jr l3c80h		;3c71
 l3c73h:
-	call sub_45d4h		;3c73
+	call message_next_record		;3c73
 	jr z,l3c86h		;3c76
-	call sub_4861h		;3c78
+	call block_0125_end		;3c78
 	jr nc,l3c73h		;3c7b
 	dec e			;3c7d
 	jr nz,l3c73h		;3c7e
 l3c80h:
 	ld hl,l3d12h		;3c80
-	call block_0139_end		;3c83
+	call l4471h		;3c83
 l3c86h:
 	ld hl,0801ch		;3c86
 	res 5,(hl)		;3c89
-	call sub_3cbeh		;3c8b
+	call mailbox_report_stored_message		;3c8b
 	call sub_1686h		;3c8e
 	ld hl,l3cf6h		;3c91
-	call sub_135ch		;3c94
+	call console_puts_highbit		;3c94
 	ld hl,(0882eh)		;3c97
-	call sub_11cch		;3c9a
+	call print_u16_decimal		;3c9a
 	ld hl,l3d03h		;3c9d
-	call sub_135ch		;3ca0
+	call console_puts_highbit		;3ca0
 	ld c,000h		;3ca3
 	call sub_153fh		;3ca5
 	jr c,l3caeh		;3ca8
 	set 2,c		;3caa
 	jr l3cb5h		;3cac
 l3caeh:
-	call sub_4a0eh		;3cae
+	call message_addressed_to_local_user		;3cae
 	jr nz,l3cb5h		;3cb1
 	set 1,c		;3cb3
 l3cb5h:
-	call block_0089_end		;3cb5
+	call block_0063_end		;3cb5
 	ld hl,l3d0bh		;3cb8
 	jp l4474h		;3cbb
-sub_3cbeh:
+mailbox_report_stored_message:
+; Prints 'Message stored as #' when the session completion flag is set.
 	ld hl,0801ch		;3cbe
 	bit 2,(hl)		;3cc1
 	ret z			;3cc3
 	res 2,(hl)		;3cc4
 	rst 10h			;3cc6
 	ret nz			;3cc7
-	call block_0137_end		;3cc8
+	call block_0109_end		;3cc8
 	ret c			;3ccb
 	call sub_1686h		;3ccc
 	ld hl,l3d32h		;3ccf
-	call sub_135ch		;3cd2
+l3cd2h:
+	call console_puts_highbit		;3cd2
 	ld de,(08ffeh)		;3cd5
-	call sub_49f2h		;3cd9
-	call sub_11cch		;3cdc
+	call message_get_number		;3cd9
+	call print_u16_decimal		;3cdc
 l3cdfh:
-	call l1302h		;3cdf
+	call print_carriage_return		;3cdf
 	jp l16adh		;3ce2
-block_0128_end:
+block_0102_end:
 
-; BLOCK 'block_0129' (start 0x3ce5 end 0x3d46)
-block_0129_start:
+; BLOCK 'block_0103' (start 0x3ce5 end 0x3d46)
+block_0103_start:
 ; high-bit-terminated text, ends at 0x3cf5: \r[AEA-9108-H$]\r>\r
 str_3ce5_aea_9108_h:
 	defb 00dh		;3ce5
@@ -13201,6 +13155,7 @@ l3d0bh:
 	defb 020h		;3d0c
 	defb 03eh		;3d0d
 	defb 08dh		;3d0e
+l3d0fh:
 	defb 04eh		;3d0f
 	defb 04fh		;3d10
 	defb 08dh		;3d11
@@ -13264,19 +13219,21 @@ str_3d32_message_stored_as:
 	defb 020h		;3d43
 	defb 023h		;3d44
 	defb 0a0h		;3d45
-block_0129_end:
+block_0103_end:
 
-; BLOCK 'block_0130' (start 0x3d46 end 0x3df0)
-block_0130_start:
+; BLOCK 'block_0104' (start 0x3d46 end 0x3e8c)
+block_0104_start:
+; Walks message records, computes remaining capacity, and stores it in SRAM.
+mailbox_compute_free_space:
 	ld hl,block_0000_start		;3d46
 	ld (0882ch),hl		;3d49
 	ld hl,08ffch		;3d4c
 	ld (0882ah),hl		;3d4f
-	call sub_18ddh		;3d52
+	call list_is_empty		;3d52
 	ei			;3d55
 	jr z,l3d82h		;3d56
 l3d58h:
-	call sub_45d4h		;3d58
+	call message_next_record		;3d58
 	jr z,l3d82h		;3d5b
 	ld hl,l000eh		;3d5d
 	add hl,de			;3d60
@@ -13289,7 +13246,7 @@ l3d58h:
 	ld h,(hl)			;3d69
 	ld l,a			;3d6a
 	ld a,01ch		;3d6b
-	call sub_11aah		;3d6d
+	call prepare_unsigned_divide		;3d6d
 	inc hl			;3d70
 	inc hl			;3d71
 	pop af			;3d72
@@ -13324,55 +13281,50 @@ l3da0h:
 	ld (0882eh),hl		;3da0
 	ld (08830h),hl		;3da3
 	ret			;3da6
-sub_3da7h:
+mailbox_poll_session:
+; Central mailbox input, editor, listing, forwarding, and read dispatcher.
 	call sub_153fh		;3da7
 	jr nc,l3dbbh		;3daa
 	ld hl,080afh		;3dac
 	bit 7,(hl)		;3daf
 	ret z			;3db1
 	ld a,(08820h)		;3db2
-	call sub_112bh		;3db5
-	call block_0133_end		;3db8
+	call select_channel_context		;3db5
+	call block_0105_end		;3db8
 l3dbbh:
 	ld a,(0889ch)		;3dbb
-	call sub_112bh		;3dbe
-	call block_0131_end		;3dc1
-	call block_0141_end		;3dc4
+	call select_channel_context		;3dbe
+	call mailbox_message_editor_drain		;3dc1
+	call block_0111_end		;3dc4
 	call sub_4bc0h		;3dc7
-	call sub_48e0h		;3dca
+	call mailbox_continue_read		;3dca
 	ret			;3dcd
-sub_3dceh:
+mailbox_emit_prompt_prefix:
+; Emits the configured mailbox prompt prefix while connected.
 	call sub_1563h		;3dce
 	ret nc			;3dd1
 	ld a,(088fah)		;3dd2
-	call sub_027dh		;3dd5
+	call test_nonzero_and_output_status		;3dd5
 	ld a,02fh		;3dd8
 	ld hl,080d5h		;3dda
 	bit 1,(hl)		;3ddd
 	jr z,l3de3h		;3ddf
 	ld a,070h		;3de1
 l3de3h:
-	jp sub_027dh		;3de3
-l3de6h:
+	jp test_nonzero_and_output_status		;3de3
+mailbox_emit_prompt_suffix:
+; Emits the configured mailbox prompt suffix while connected.
 	call sub_1563h		;3de6
 	ret nc			;3de9
 	ld a,(088feh)		;3dea
-	jp sub_027dh		;3ded
-block_0130_end:
-
-; BLOCK 'block_0131' (start 0x3df0 end 0x3df7)
-block_0131_start:
-	defb 0d7h		;3df0
-	defb 0c8h		;3df1
-	defb 03eh		;3df2
-	defb 000h		;3df3
-	defb 0c3h		;3df4
-	defb 0c9h		;3df5
-	defb 02bh		;3df6
-block_0131_end:
-
-; BLOCK 'block_0132' (start 0x3df7 end 0x3e8c)
-block_0132_start:
+	jp test_nonzero_and_output_status		;3ded
+sub_3df0h:
+	rst 10h			;3df0
+	ret z			;3df1
+	ld a,000h		;3df2
+	jp block_0069_end		;3df4
+mailbox_message_editor_drain:
+; Drains input into the mailbox message editor and handles completion state.
 	ld hl,0801ch		;3df7
 	bit 0,(hl)		;3dfa
 	ret z			;3dfc
@@ -13384,11 +13336,11 @@ l3e01h:
 	and a			;3e08
 	sbc hl,de		;3e09
 	jr z,l3e1fh		;3e0b
-	call sub_0f38h		;3e0d
-	call sub_3e2bh		;3e10
+	call command_buffer_get		;3e0d
+	call mailbox_message_editor_putc		;3e10
 	jr nz,l3e01h		;3e13
 	ld de,(08ffeh)		;3e15
-	call sub_17feh		;3e19
+	call queue_increment_counter_and_put		;3e19
 	ei			;3e1c
 	jr l3e01h		;3e1d
 l3e1fh:
@@ -13398,7 +13350,8 @@ l3e1fh:
 	ld a,0d3h		;3e25
 	ld (08828h),a		;3e27
 	ret			;3e2a
-sub_3e2bh:
+mailbox_message_editor_putc:
+; Processes one editor byte, including Ctrl-Z and /EX termination.
 	ld e,a			;3e2b
 	ld hl,08828h		;3e2c
 	ld a,(hl)			;3e2f
@@ -13413,10 +13366,10 @@ l3e3bh:
 	jr z,l3e61h		;3e3d
 	ld de,(08832h)		;3e3f
 	ld d,000h		;3e43
-	ld hl,block_0132_end		;3e45
+	ld hl,block_0104_end		;3e45
 	add hl,de			;3e48
 	ld d,a			;3e49
-	call sub_136dh		;3e4a
+	call ascii_to_uppercase		;3e4a
 	cp (hl)			;3e4d
 	jr z,l3e57h		;3e4e
 	ld e,000h		;3e50
@@ -13454,18 +13407,20 @@ l3e86h:
 	ret nz			;3e88
 	bit 3,(hl)		;3e89
 	ret			;3e8b
-block_0132_end:
+block_0104_end:
 
-; BLOCK 'block_0133' (start 0x3e8c end 0x3e90)
-block_0133_start:
+; BLOCK 'block_0105' (start 0x3e8c end 0x3e90)
+block_0105_start:
 	defb 00dh		;3e8c
 	defb 02fh		;3e8d
 	defb 045h		;3e8e
 	defb 058h		;3e8f
-block_0133_end:
+block_0105_end:
 
-; BLOCK 'block_0134' (start 0x3e90 end 0x3f3a)
-block_0134_start:
+; BLOCK 'block_0106' (start 0x3e90 end 0x3f3f)
+block_0106_start:
+; Commits a CR-terminated editor line and swaps edit buffers.
+mailbox_editor_submit_line:
 	ld de,08afch		;3e90
 	ld hl,(08afah)		;3e93
 	add hl,de			;3e96
@@ -13473,13 +13428,13 @@ block_0134_start:
 	and 07fh		;3e98
 	cp 00dh		;3e9a
 	ret nz			;3e9c
-	call sub_3ec9h		;3e9d
+	call mailbox_swap_edit_buffers		;3e9d
 	ld hl,0801ah		;3ea0
 	set 1,(hl)		;3ea3
-	call sub_3edbh		;3ea5
+	call mailbox_commit_message_line		;3ea5
 	ld hl,0801ah		;3ea8
 	res 1,(hl)		;3eab
-	call sub_3ec9h		;3ead
+	call mailbox_swap_edit_buffers		;3ead
 l3eb0h:
 	ld hl,block_0000_start		;3eb0
 	ld (08afah),hl		;3eb3
@@ -13488,10 +13443,11 @@ l3eb0h:
 	ld a,(08828h)		;3ebb
 	or a			;3ebe
 	ret nz			;3ebf
-	call sub_4bfeh		;3ec0
-	call block_0129_end		;3ec3
+	call mailbox_abort_pending_storage		;3ec0
+	call block_0103_end		;3ec3
 	jp l3c35h		;3ec6
-sub_3ec9h:
+mailbox_swap_edit_buffers:
+; Swaps 0x82-byte edit buffers at 0x8afa and 0x89f7.
 	ld hl,08afah		;3ec9
 	ld de,089f7h		;3ecc
 	ld b,082h		;3ecf
@@ -13505,7 +13461,8 @@ l3ed1h:
 	inc hl			;3ed7
 	djnz l3ed1h		;3ed8
 	ret			;3eda
-sub_3edbh:
+mailbox_commit_message_line:
+; High-bit terminates and stores the current mailbox message line.
 	ld hl,089f9h		;3edb
 	ld de,(089f7h)		;3ede
 	add hl,de			;3ee2
@@ -13517,16 +13474,16 @@ sub_3edbh:
 	cp 0ffh		;3ef0
 	jr z,l3f19h		;3ef2
 	cp 0feh		;3ef4
-	jp z,block_0143_end		;3ef6
+	jp z,block_0113_end		;3ef6
 	ld ix,088b9h		;3ef9
 	bit 0,(ix+002h)		;3efd
 	jr nz,l3f1eh		;3f01
-	call block_0137_end		;3f03
+	call block_0109_end		;3f03
 	jr nc,l3f0eh		;3f06
 	bit 4,(ix+002h)		;3f08
 	jr nz,l3f1eh		;3f0c
 l3f0eh:
-	call sub_4a0eh		;3f0e
+	call message_addressed_to_local_user		;3f0e
 	jr nz,l3f19h		;3f11
 	bit 1,(ix+002h)		;3f13
 	jr nz,l3f1eh		;3f17
@@ -13538,30 +13495,28 @@ l3f1eh:
 	inc hl			;3f21
 	ld a,(hl)			;3f22
 	dec hl			;3f23
-	call sub_136dh		;3f24
+	call ascii_to_uppercase		;3f24
 	ld (08829h),a		;3f27
 	push hl			;3f2a
 	call sub_333dh		;3f2b
 	pop hl			;3f2e
 	jp l301dh		;3f2f
-sub_3f32h:
-	ld hl,l3f3fh		;3f32
+mailbox_command_table_lookup:
+; Looks up a two-byte mailbox command-table entry from index A.
+	ld hl,block_0106_end		;3f32
 	ld e,a			;3f35
 	ld d,000h		;3f36
 	add hl,de			;3f38
 	add hl,de			;3f39
-block_0134_end:
+	ld e,(hl)			;3f3a
+	inc hl			;3f3b
+	ld h,(hl)			;3f3c
+	ld l,e			;3f3d
+	jp (hl)			;3f3e
+block_0106_end:
 
-; BLOCK 'block_0135' (start 0x3f3a end 0x43a6)
-block_0135_start:
-; high-bit-terminated text, ends at 0x3f3e: ^#fki
-str_3f3a_fki:
-	defb 05eh		;3f3a
-	defb 023h		;3f3b
-	defb 066h		;3f3c
-	defb 06bh		;3f3d
-	defb 0e9h		;3f3e
-l3f3fh:
+; BLOCK 'block_0107' (start 0x3f3f end 0x43a6)
+block_0107_start:
 	defb 095h		;3f3f
 ; high-bit-terminated text, ends at 0x3f45: CoF=B6
 str_3f40_cof_b6:
@@ -14699,16 +14654,16 @@ str_4174_e_msg_e_msg:
 	defb 0c3h		;43a3
 	defb 0f6h		;43a4
 	defb 046h		;43a5
-block_0135_end:
+block_0107_end:
 
-; BLOCK 'block_0136' (start 0x43a6 end 0x43ab)
-block_0136_start:
+; BLOCK 'block_0108' (start 0x43a6 end 0x43ab)
+block_0108_start:
 	ld a,007h		;43a6
-	jp block_0159_end		;43a8
-block_0136_end:
+	jp mailbox_response_dispatch		;43a8
+block_0108_end:
 
-; BLOCK 'block_0137' (start 0x43ab end 0x440b)
-block_0137_start:
+; BLOCK 'block_0109' (start 0x43ab end 0x440b)
+block_0109_start:
 	defb 03ah		;43ab
 	defb 029h		;43ac
 	defb 088h		;43ad
@@ -14807,10 +14762,12 @@ str_43fe_5eorig:
 	defb 020h		;4408
 	defb 023h		;4409
 	defb 0bah		;440a
-block_0137_end:
+block_0109_end:
 
-; BLOCK 'block_0138' (start 0x440b end 0x441a)
-block_0138_start:
+; BLOCK 'block_0110' (start 0x440b end 0x447a)
+block_0110_start:
+; Checks connection and mailbox access state; result is returned in carry.
+mailbox_access_check:
 	call sub_153fh		;440b
 	ret nc			;440e
 	push hl			;440f
@@ -14821,131 +14778,78 @@ block_0138_start:
 	ret nz			;4417
 	and a			;4418
 	ret			;4419
-block_0138_end:
-
-; BLOCK 'block_0139' (start 0x441a end 0x4471)
-block_0139_start:
-	defb 0cdh		;441a
-	defb 086h		;441b
-	defb 016h		;441c
-	defb 0cdh		;441d
-	defb 037h		;441e
-	defb 02fh		;441f
-	defb 0c3h		;4420
-	defb 0adh		;4421
-	defb 016h		;4422
-	defb 0cdh		;4423
-	defb 016h		;4424
-	defb 015h		;4425
-	defb 0d2h		;4426
-	defb 062h		;4427
-	defb 04dh		;4428
-	defb 03eh		;4429
-	defb 04ch		;442a
-	defb 032h		;442b
-	defb 028h		;442c
-	defb 088h		;442d
-	defb 021h		;442e
-	defb 0fch		;442f
-	defb 08fh		;4430
-	defb 022h		;4431
-	defb 02ah		;4432
-	defb 088h		;4433
-	defb 0cdh		;4434
-	defb 0ddh		;4435
-	defb 018h		;4436
-	defb 0fbh		;4437
-	defb 0cah		;4438
-	defb 000h		;4439
-	defb 047h		;443a
-	defb 0cdh		;443b
-	defb 03fh		;443c
-	defb 015h		;443d
-	defb 038h		;443e
-	defb 013h		;443f
-	defb 021h		;4440
-	defb 094h		;4441
-	defb 02bh		;4442
-	defb 0e3h		;4443
-	defb 0cdh		;4444
-	defb 0f0h		;4445
-	defb 03dh		;4446
-	defb 0cdh		;4447
-	defb 0ceh		;4448
-	defb 03dh		;4449
-	defb 021h		;444a
-	defb 0f7h		;444b
-	defb 045h		;444c
-	defb 0cdh		;444d
-	defb 05ch		;444e
-	defb 013h		;444f
-	defb 0c3h		;4450
-	defb 0e6h		;4451
-	defb 03dh		;4452
-	defb 0cdh		;4453
-	defb 0d4h		;4454
-	defb 045h		;4455
-	defb 0cah		;4456
-	defb 000h		;4457
-	defb 047h		;4458
-	defb 0cdh		;4459
-	defb 061h		;445a
-	defb 048h		;445b
-	defb 030h		;445c
-	defb 0f5h		;445d
-	defb 03ah		;445e
-	defb 029h		;445f
-	defb 088h		;4460
-	defb 0feh		;4461
-	defb 04dh		;4462
-	defb 020h		;4463
-	defb 003h		;4464
-	defb 01dh		;4465
-	defb 020h		;4466
-	defb 0ebh		;4467
-	defb 021h		;4468
-	defb 0fch		;4469
-	defb 08fh		;446a
-	defb 022h		;446b
-	defb 02ah		;446c
-	defb 088h		;446d
-	defb 021h		;446e
-	defb 0f7h		;446f
-	defb 045h		;4470
-block_0139_end:
-
-; BLOCK 'block_0140' (start 0x4471 end 0x447a)
-block_0140_start:
+; Prints mailbox help and exits through the common response path.
+mailbox_help_command:
+	call sub_1686h		;441a
+	call block_0071_end		;441d
+	jp l16adh		;4420
+; Begins listing messages and prints the list header.
+mailbox_list_command:
+	call sub_1516h		;4423
+	jp nc,block_0133_end		;4426
+	ld a,04ch		;4429
+	ld (08828h),a		;442b
+	ld hl,08ffch		;442e
+	ld (0882ah),hl		;4431
+	call list_is_empty		;4434
+	ei			;4437
+	jp z,block_0117_end		;4438
+	call sub_153fh		;443b
+	jr c,l4453h		;443e
+	ld hl,l2b94h		;4440
+	ex (sp),hl			;4443
+	call sub_3df0h		;4444
+	call mailbox_emit_prompt_prefix		;4447
+	ld hl,block_0112_end		;444a
+	call console_puts_highbit		;444d
+	jp mailbox_emit_prompt_suffix		;4450
+l4453h:
+	call message_next_record		;4453
+	jp z,block_0117_end		;4456
+	call block_0125_end		;4459
+	jr nc,l4453h		;445c
+	ld a,(08829h)		;445e
+	cp 04dh		;4461
+	jr nz,l4468h		;4463
+	dec e			;4465
+	jr nz,l4453h		;4466
+l4468h:
+	ld hl,08ffch		;4468
+	ld (0882ah),hl		;446b
+	ld hl,block_0112_end		;446e
+l4471h:
 	call sub_1686h		;4471
 l4474h:
-	call sub_135ch		;4474
+	call console_puts_highbit		;4474
 	jp l16adh		;4477
-block_0140_end:
+block_0110_end:
 
-; BLOCK 'block_0141' (start 0x447a end 0x447d)
-block_0141_start:
+; BLOCK 'block_0111' (start 0x447a end 0x447d)
+block_0111_start:
 	defb 0c3h		;447a
 	defb 004h		;447b
 	defb 013h		;447c
-block_0141_end:
+block_0111_end:
 
-; BLOCK 'block_0142' (start 0x447d end 0x45f7)
-block_0142_start:
+; BLOCK 'block_0112' (start 0x447d end 0x45f7)
+block_0112_start:
+; Continues listing message records until pause or end.
+mailbox_continue_list:
 	ld a,(08828h)		;447d
 	cp 04ch		;4480
 	ret nz			;4482
-	call sub_49a2h		;4483
+	call mailbox_connection_ready_test		;4483
 	ei			;4486
 	ret nz			;4487
-	call sub_45d4h		;4488
+	call message_next_record		;4488
 	jr z,l44b1h		;448b
 	call sub_153fh		;448d
 	jr c,l449bh		;4490
-	call sub_3dceh		;4492
-	call sub_44ddh		;4495
-	jp l3de6h		;4498
+	call mailbox_emit_prompt_prefix		;4492
+	call mailbox_print_message_summary		;4495
+	jp mailbox_emit_prompt_suffix		;4498
 l449bh:
-	call sub_4861h		;449b
+	call block_0125_end		;449b
 	ret nc			;449e
 	ld a,(08829h)		;449f
 	cp 04dh		;44a2
@@ -14954,13 +14858,13 @@ l449bh:
 	ret nz			;44a7
 l44a8h:
 	call sub_1686h		;44a8
-	call sub_44ddh		;44ab
+	call mailbox_print_message_summary		;44ab
 	jp l16adh		;44ae
 l44b1h:
 	call sub_153fh		;44b1
 	jr nc,l44d0h		;44b4
 	ld a,(08820h)		;44b6
-	call sub_112bh		;44b9
+	call select_channel_context		;44b9
 	ld a,(iy+058h)		;44bc
 	cp (iy+040h)		;44bf
 	ret nz			;44c2
@@ -14974,19 +14878,21 @@ l44d0h:
 	xor a			;44d0
 	ld (08828h),a		;44d1
 	jp sub_1042h		;44d4
-sub_44d7h:
-	ld hl,block_0142_end		;44d7
-	call sub_135ch		;44da
-sub_44ddh:
+mailbox_print_list_header:
+; Prints the mailbox message-list column header.
+	ld hl,block_0112_end		;44d7
+	call console_puts_highbit		;44da
+mailbox_print_message_summary:
+; Prints number, size, type, status, time, callsigns, and title.
 	push bc			;44dd
 	push hl			;44de
-	call block_0153_end		;44df
+	call sub_49eeh		;44df
 	ex de,hl			;44e2
 	call sub_45c0h		;44e3
 	ex de,hl			;44e6
-	call sub_11cch		;44e7
-	call sub_12feh		;44ea
-	call block_0147_end		;44ed
+	call print_u16_decimal		;44e7
+	call print_space		;44ea
+	call block_0121_end		;44ed
 	ld a,046h		;44f0
 	bit 4,(hl)		;44f2
 	jr nz,l44feh		;44f4
@@ -14995,30 +14901,30 @@ sub_44ddh:
 	jr z,l44feh		;44fa
 	ld a,059h		;44fc
 l44feh:
-	call sub_1304h		;44fe
-	call sub_12feh		;4501
+	call console_putchar_routed		;44fe
+	call print_space		;4501
 	ld hl,l000ah+2		;4504
 	add hl,de			;4507
 	ld e,(hl)			;4508
 	inc hl			;4509
 	ld d,(hl)			;450a
-	call sub_45ach		;450b
+	call print_message_size		;450b
 	ex de,hl			;450e
-	call sub_11cch		;450f
+	call print_u16_decimal		;450f
 	ld hl,l0011h		;4512
 	ld de,(0882ah)		;4515
 	add hl,de			;4519
-	call sub_45e8h		;451a
-	call sub_45e8h		;451d
-	call sub_12feh		;4520
-	call block_0149_end		;4523
-	call sub_12feh		;4526
-	call sub_4593h		;4529
+	call print_ax25_callsign		;451a
+	call print_ax25_callsign		;451d
+	call print_space		;4520
+	call block_0123_end		;4523
+	call print_space		;4526
+	call message_get_size_or_body_pointer		;4529
 	ld hl,l0007h		;452c
 	add hl,bc			;452f
 	ld c,000h		;4530
 	call sub_15d7h		;4532
-	call sub_4593h		;4535
+	call message_get_size_or_body_pointer		;4535
 	ld hl,l0009h		;4538
 	add hl,bc			;453b
 	ld b,h			;453c
@@ -15036,10 +14942,10 @@ l44feh:
 	jr z,l4555h		;4552
 	inc c			;4554
 l4555h:
-	call sub_49fbh		;4555
+	call message_load_body_metadata		;4555
 	jr z,l4574h		;4558
 	ld de,(0882ah)		;455a
-	call sub_187dh		;455e
+	call queue_get_byte		;455e
 	or a			;4561
 	jr nz,l4567h		;4562
 	inc c			;4564
@@ -15049,14 +14955,15 @@ l4567h:
 	jr z,l4574h		;4569
 	bit 0,c		;456b
 	jr nz,l4555h		;456d
-	call sub_1304h		;456f
+	call console_putchar_routed		;456f
 	djnz l4555h		;4572
 l4574h:
-	call l1302h		;4574
+	call print_carriage_return		;4574
 	pop hl			;4577
 	pop bc			;4578
 	ret			;4579
-sub_457ah:
+message_get_address_field:
+; Returns a message address-field pointer, following indirection when required.
 	ld de,(0882ah)		;457a
 	ld hl,l000eh		;457e
 	add hl,de			;4581
@@ -15072,7 +14979,8 @@ sub_457ah:
 	add hl,bc			;4590
 	and a			;4591
 	ret			;4592
-sub_4593h:
+message_get_size_or_body_pointer:
+; Returns message size/body metadata from the current record.
 	ld de,(0882ah)		;4593
 	ld hl,l000eh		;4597
 	add hl,de			;459a
@@ -15090,29 +14998,31 @@ l45a8h:
 	inc l			;45a9
 	ld b,(hl)			;45aa
 	ret			;45ab
-sub_45ach:
+print_message_size:
+; Prints a message size from DE with decimal field formatting.
 	ld hl,l270fh		;45ac
 	and a			;45af
 	sbc hl,de		;45b0
 	ret c			;45b2
-	call sub_12feh		;45b3
+	call print_space		;45b3
 	ld hl,003e7h		;45b6
 	and a			;45b9
 	sbc hl,de		;45ba
 	ret c			;45bc
-	call sub_12feh		;45bd
+	call print_space		;45bd
 sub_45c0h:
 	ld hl,l0063h		;45c0
 	and a			;45c3
 	sbc hl,de		;45c4
 	ret c			;45c6
-	call sub_12feh		;45c7
+	call print_space		;45c7
 	ld hl,l0009h		;45ca
 	and a			;45cd
 	sbc hl,de		;45ce
 	ret c			;45d0
-	jp sub_12feh		;45d1
-sub_45d4h:
+	jp print_space		;45d1
+message_next_record:
+; Advances the current message record; Z at the list sentinel.
 	ld hl,(0882ah)		;45d4
 	inc l			;45d7
 	inc l			;45d8
@@ -15125,21 +15035,22 @@ sub_45d4h:
 	ret z			;45e2
 	ld (0882ah),de		;45e3
 	ret			;45e7
-sub_45e8h:
-	call sub_12feh		;45e8
+print_ax25_callsign:
+; Prints six shifted AX.25 callsign bytes from HL.
+	call print_space		;45e8
 	ld b,006h		;45eb
 l45edh:
 	ld a,(hl)			;45ed
 	inc l			;45ee
 	and a			;45ef
 	rra			;45f0
-	call sub_1304h		;45f1
+	call console_putchar_routed		;45f1
 	djnz l45edh		;45f4
 	ret			;45f6
-block_0142_end:
+block_0112_end:
 
-; BLOCK 'block_0143' (start 0x45f7 end 0x465f)
-block_0143_start:
+; BLOCK 'block_0113' (start 0x45f7 end 0x465f)
+block_0113_start:
 ; high-bit-terminated text, ends at 0x4630: Msg#    Size To     From   @ BBS  Date       Time   Title\r
 str_45f7_msg_size_to_from:
 	defb 04dh		;45f7
@@ -15246,22 +15157,22 @@ str_45f7_msg_size_to_from:
 	defb 028h		;465c
 	defb 088h		;465d
 	defb 0c9h		;465e
-block_0143_end:
+block_0113_end:
 
-; BLOCK 'block_0144' (start 0x465f end 0x466f)
-block_0144_start:
+; BLOCK 'block_0114' (start 0x465f end 0x466f)
+block_0114_start:
 	ld a,(08828h)		;465f
 	cp 013h		;4662
 	ret z			;4664
-	call block_0137_end		;4665
+	call block_0109_end		;4665
 	ret nc			;4668
 	ld a,001h		;4669
 	ld (08828h),a		;466b
 	ret			;466e
-block_0144_end:
+block_0114_end:
 
-; BLOCK 'block_0145' (start 0x466f end 0x475b)
-block_0145_start:
+; BLOCK 'block_0115' (start 0x466f end 0x46f9)
+block_0115_start:
 	defb 0cdh		;466f
 	defb 016h		;4670
 	defb 015h		;4671
@@ -15400,17 +15311,29 @@ block_0145_start:
 	defb 01eh		;46f6
 	defb 000h		;46f7
 	defb 07bh		;46f8
-	defb 0c3h		;46f9
-	defb 067h		;46fa
-	defb 04dh		;46fb
+block_0115_end:
+
+; BLOCK 'block_0116' (start 0x46f9 end 0x46fc)
+block_0116_start:
+	jp mailbox_response_dispatch		;46f9
+block_0116_end:
+
+; BLOCK 'block_0117' (start 0x46fc end 0x4700)
+block_0117_start:
 	defb 03eh		;46fc
 	defb 014h		;46fd
 	defb 018h		;46fe
 	defb 0f9h		;46ff
-	defb 03eh		;4700
-	defb 00bh		;4701
-	defb 018h		;4702
-	defb 0f5h		;4703
+block_0117_end:
+
+; BLOCK 'block_0118' (start 0x4700 end 0x4704)
+block_0118_start:
+	ld a,00bh		;4700
+	jr block_0115_end		;4702
+block_0118_end:
+
+; BLOCK 'block_0119' (start 0x4704 end 0x475b)
+block_0119_start:
 	defb 0cdh		;4704
 	defb 0d4h		;4705
 	defb 045h		;4706
@@ -15498,17 +15421,17 @@ block_0145_start:
 	defb 048h		;4758
 	defb 030h		;4759
 	defb 0a1h		;475a
-block_0145_end:
+block_0119_end:
 
-; BLOCK 'block_0146' (start 0x475b end 0x4764)
-block_0146_start:
+; BLOCK 'block_0120' (start 0x475b end 0x4764)
+block_0120_start:
 	call sub_1686h		;475b
-	call sub_48b9h		;475e
+	call mailbox_begin_read_message		;475e
 	jp l3cdfh		;4761
-block_0146_end:
+block_0120_end:
 
-; BLOCK 'block_0147' (start 0x4764 end 0x47ca)
-block_0147_start:
+; BLOCK 'block_0121' (start 0x4764 end 0x47ca)
+block_0121_start:
 	defb 0cdh		;4764
 	defb 0b7h		;4765
 	defb 049h		;4766
@@ -15611,10 +15534,12 @@ block_0147_start:
 	defb 0c3h		;47c7
 	defb 0e6h		;47c8
 	defb 03dh		;47c9
-block_0147_end:
+block_0121_end:
 
-; BLOCK 'block_0148' (start 0x47ca end 0x47e3)
-block_0148_start:
+; BLOCK 'block_0122' (start 0x47ca end 0x47e3)
+block_0122_start:
+; Prints B, T, or P according to current message flags.
+print_message_type:
 	ld hl,l000eh		;47ca
 	ld de,(0882ah)		;47cd
 	add hl,de			;47d1
@@ -15626,11 +15551,11 @@ block_0148_start:
 	jr nz,l47e0h		;47dc
 	ld a,050h		;47de
 l47e0h:
-	jp sub_1304h		;47e0
-block_0148_end:
+	jp console_putchar_routed		;47e0
+block_0122_end:
 
-; BLOCK 'block_0149' (start 0x47e3 end 0x47ea)
-block_0149_start:
+; BLOCK 'block_0123' (start 0x47e3 end 0x47ea)
+block_0123_start:
 ; high-bit-terminated text, ends at 0x47e9: @ BBS: 
 str_47e3_bbs:
 	defb 040h		;47e3
@@ -15640,11 +15565,13 @@ str_47e3_bbs:
 	defb 053h		;47e7
 	defb 03ah		;47e8
 	defb 0a0h		;47e9
-block_0149_end:
+block_0123_end:
 
-; BLOCK 'block_0150' (start 0x47ea end 0x4811)
-block_0150_start:
-	call sub_457ah		;47ea
+; BLOCK 'block_0124' (start 0x47ea end 0x4811)
+block_0124_start:
+; Prints the BBS callsign field or six spaces.
+print_message_bbs_callsign:
+	call message_get_address_field		;47ea
 	ld b,006h		;47ed
 	jr c,l4809h		;47ef
 l47f1h:
@@ -15659,19 +15586,19 @@ l47f1h:
 	cp 05bh		;47ff
 	jr nc,l4809h		;4801
 l4803h:
-	call sub_1304h		;4803
+	call console_putchar_routed		;4803
 	djnz l47f1h		;4806
 	ret			;4808
 l4809h:
 	ld a,020h		;4809
 l480bh:
-	call sub_1304h		;480b
+	call console_putchar_routed		;480b
 	djnz l480bh		;480e
 	ret			;4810
-block_0150_end:
+block_0124_end:
 
-; BLOCK 'block_0151' (start 0x4811 end 0x4865)
-block_0151_start:
+; BLOCK 'block_0125' (start 0x4811 end 0x4861)
+block_0125_start:
 	defb 0cdh		;4811
 	defb 07ah		;4812
 	defb 045h		;4813
@@ -15736,6 +15663,7 @@ str_4820_bid:
 	defb 02ch		;484c
 	defb 070h		;484d
 	defb 0c9h		;484e
+l484fh:
 	defb 0a2h		;484f
 	defb 0a6h		;4850
 	defb 0a8h		;4851
@@ -15755,23 +15683,18 @@ l485bh:
 	defb 0a6h		;485d
 	defb 09eh		;485e
 	defb 0a0h		;485f
-; high-bit-terminated text, ends at 0x4864: @!OHM
-str_4860_ohm:
 	defb 040h		;4860
-sub_4861h:
-	defb 021h		;4861
-	defb 04fh		;4862
-	defb 048h		;4863
-	defb 0cdh		;4864
-block_0151_end:
+block_0125_end:
 
-; BLOCK 'block_0152' (start 0x4865 end 0x49b7)
-block_0152_start:
-	dec a			;4865
-	ld c,d			;4866
+; BLOCK 'block_0126' (start 0x4861 end 0x49b7)
+block_0126_start:
+; Tests current-message callsign fields against the current user.
+message_matches_user:
+	ld hl,l484fh		;4861
+	call message_compare_callsign		;4864
 	jr c,l4888h		;4867
 	ld hl,l4855h		;4869
-	call sub_4a3dh		;486c
+	call message_compare_callsign		;486c
 	jr c,l4888h		;486f
 	ld de,l0011h		;4871
 	call sub_4a2fh		;4874
@@ -15779,7 +15702,7 @@ block_0152_start:
 	ld de,l0017h		;4879
 	call sub_4a2fh		;487c
 	jr c,l4888h		;487f
-	call sub_4a0eh		;4881
+	call message_addressed_to_local_user		;4881
 	scf			;4884
 	ccf			;4885
 	ret nz			;4886
@@ -15790,32 +15713,35 @@ l4888h:
 l488bh:
 	ld e,001h		;488b
 	ret			;488d
-sub_488eh:
+message_matches_local_identities:
+; Compares a message against current user and local callsigns.
 	ld hl,l485bh		;488e
-	call sub_4a3dh		;4891
+	call message_compare_callsign		;4891
 	ret c			;4894
 	ld hl,08068h		;4895
-	call sub_4a3dh		;4898
+	call message_compare_callsign		;4898
 	ret c			;489b
 	ld hl,08078h		;489c
-	jp sub_4a3dh		;489f
-l48a2h:
-	call sub_45d4h		;48a2
+	jp message_compare_callsign		;489f
+find_next_unread_user_message:
+; Advances to the next unread message addressed to the current user.
+	call message_next_record		;48a2
 	scf			;48a5
 	ret z			;48a6
 	ld hl,l000eh		;48a7
 	add hl,de			;48aa
 	bit 1,(hl)		;48ab
-	jr nz,l48a2h		;48ad
-	call sub_4861h		;48af
-	jr nc,l48a2h		;48b2
+	jr nz,find_next_unread_user_message		;48ad
+	call block_0125_end		;48af
+	jr nc,find_next_unread_user_message		;48b2
 	dec e			;48b4
-	jr nz,l48a2h		;48b5
+	jr nz,find_next_unread_user_message		;48b5
 	and a			;48b7
 	ret			;48b8
-sub_48b9h:
+mailbox_begin_read_message:
+; Prints summary and enters mailbox read mode.
 	push de			;48b9
-	call sub_44d7h		;48ba
+	call mailbox_print_list_header		;48ba
 	pop hl			;48bd
 	ld a,052h		;48be
 	ld (08828h),a		;48c0
@@ -15825,7 +15751,8 @@ sub_48b9h:
 	ret nz			;48c9
 	set 3,(hl)		;48ca
 	ret			;48cc
-sub_48cdh:
+mailbox_finish_read_message:
+; Leaves active-read mode and marks the current message read.
 	ld hl,0801ch		;48cd
 	bit 3,(hl)		;48d0
 	ret z			;48d2
@@ -15835,8 +15762,9 @@ sub_48cdh:
 	add hl,de			;48dc
 	set 1,(hl)		;48dd
 	ret			;48df
-sub_48e0h:
-	call sub_49a2h		;48e0
+mailbox_continue_read:
+; Streams message text and advances unread/all-message selection.
+	call mailbox_connection_ready_test		;48e0
 	ei			;48e3
 	ret nz			;48e4
 	ld a,(08828h)		;48e5
@@ -15845,7 +15773,7 @@ sub_48e0h:
 	call sub_153fh		;48ec
 	jr nc,l48feh		;48ef
 	ld a,(08820h)		;48f1
-	call sub_112bh		;48f4
+	call select_channel_context		;48f4
 	ld a,(iy+058h)		;48f7
 	cp (iy+040h)		;48fa
 	ret nz			;48fd
@@ -15867,53 +15795,53 @@ l48feh:
 	ei			;491c
 	jr l4924h		;491d
 l491fh:
-	call sub_48cdh		;491f
+	call mailbox_finish_read_message		;491f
 	res 4,(hl)		;4922
 l4924h:
 	jp l44b1h		;4924
 l4927h:
-	call sub_48cdh		;4927
+	call mailbox_finish_read_message		;4927
 	ld a,(08829h)		;492a
 	cp 04dh		;492d
 	jp nz,l44b1h		;492f
-	call l48a2h		;4932
+	call find_next_unread_user_message		;4932
 	jp c,l44b1h		;4935
 	ld e,001h		;4938
-	jp block_0145_end		;493a
+	jp block_0119_end		;493a
 l493dh:
 	cp 052h		;493d
 	ret nz			;493f
 	call sub_153fh		;4940
 	jr c,l4962h		;4943
-	call sub_3dceh		;4945
+	call mailbox_emit_prompt_prefix		;4945
 	ld b,080h		;4948
 l494ah:
-	call sub_49fbh		;494a
+	call message_load_body_metadata		;494a
 	jr z,l4988h		;494d
 	ld de,(0882ah)		;494f
-	call sub_187dh		;4953
-	call sub_1304h		;4956
+	call queue_get_byte		;4953
+	call console_putchar_routed		;4956
 	cp 00dh		;4959
 	jr z,l495fh		;495b
 	djnz l494ah		;495d
 l495fh:
-	jp l3de6h		;495f
+	jp mailbox_emit_prompt_suffix		;495f
 l4962h:
 	call sub_1686h		;4962
 	ld a,(08088h)		;4965
 	ld b,a			;4968
 l4969h:
-	call sub_49fbh		;4969
+	call message_load_body_metadata		;4969
 	jr z,l4988h		;496c
 	ld de,(0882ah)		;496e
-	call sub_187dh		;4972
+	call queue_get_byte		;4972
 	ld hl,080abh		;4975
 	bit 4,(hl)		;4978
 	jr z,l4980h		;497a
 	cp 00ah		;497c
 	jr z,l4969h		;497e
 l4980h:
-	call sub_1304h		;4980
+	call console_putchar_routed		;4980
 	djnz l4969h		;4983
 sub_4985h:
 	jp l16adh		;4985
@@ -15924,26 +15852,27 @@ l4988h:
 	jr nz,l4993h		;498f
 	ld a,00dh		;4991
 l4993h:
-	call sub_1304h		;4993
+	call console_putchar_routed		;4993
 	call sub_4985h		;4996
-	call l3de6h		;4999
+	call mailbox_emit_prompt_suffix		;4999
 	ld a,072h		;499c
 	ld (08828h),a		;499e
 	ret			;49a1
-sub_49a2h:
+mailbox_connection_ready_test:
+; Tests queue and connection state before mailbox list/read operations.
 	ld hl,08ff0h		;49a2
 	call sub_153fh		;49a5
 	jr c,l49b4h		;49a8
 	ld hl,08fd4h		;49aa
-	call sub_18a7h		;49ad
+	call list_contains_equivalent_block		;49ad
 	ret nz			;49b0
 	ld hl,08fd8h		;49b1
 l49b4h:
-	jp sub_18a7h		;49b4
-block_0152_end:
+	jp list_contains_equivalent_block		;49b4
+block_0126_end:
 
-; BLOCK 'block_0153' (start 0x49b7 end 0x49ee)
-block_0153_start:
+; BLOCK 'block_0127' (start 0x49b7 end 0x49cf)
+block_0127_start:
 	defb 03ah		;49b7
 	defb 041h		;49b8
 	defb 088h		;49b9
@@ -15968,43 +15897,32 @@ block_0153_start:
 	defb 0d8h		;49cc
 	defb 044h		;49cd
 	defb 04dh		;49ce
-	defb 021h		;49cf
-	defb 0fch		;49d0
-	defb 08fh		;49d1
-	defb 022h		;49d2
-	defb 02ah		;49d3
-	defb 088h		;49d4
-	defb 0cdh		;49d5
-	defb 0ddh		;49d6
-	defb 018h		;49d7
-	defb 0fbh		;49d8
-	defb 028h		;49d9
-	defb 00fh		;49da
-	defb 0cdh		;49db
-	defb 0d4h		;49dc
-	defb 045h		;49dd
-	defb 028h		;49de
-	defb 00ah		;49df
-	defb 0cdh		;49e0
-	defb 0eeh		;49e1
-	defb 049h		;49e2
-	defb 0a7h		;49e3
-	defb 0edh		;49e4
-	defb 042h		;49e5
-	defb 020h		;49e6
-	defb 0f3h		;49e7
-	defb 0a7h		;49e8
-	defb 0c9h		;49e9
-	defb 01eh		;49ea
-	defb 00bh		;49eb
-	defb 037h		;49ec
-	defb 0c9h		;49ed
-block_0153_end:
+block_0127_end:
 
-; BLOCK 'block_0154' (start 0x49ee end 0x4a02)
-block_0154_start:
+; BLOCK 'block_0128' (start 0x49cf end 0x4aa9)
+block_0128_start:
+	ld hl,08ffch		;49cf
+	ld (0882ah),hl		;49d2
+	call list_is_empty		;49d5
+	ei			;49d8
+	jr z,l49eah		;49d9
+l49dbh:
+	call message_next_record		;49db
+	jr z,l49eah		;49de
+	call sub_49eeh		;49e0
+	and a			;49e3
+	sbc hl,bc		;49e4
+	jr nz,l49dbh		;49e6
+	and a			;49e8
+	ret			;49e9
+l49eah:
+	ld e,00bh		;49ea
+	scf			;49ec
+	ret			;49ed
+sub_49eeh:
 	ld de,(0882ah)		;49ee
-sub_49f2h:
+message_get_number:
+; Returns the 16-bit message number from record DE in HL.
 	ld hl,l000fh		;49f2
 	add hl,de			;49f5
 	ld a,(hl)			;49f6
@@ -16012,32 +15930,24 @@ sub_49f2h:
 	ld h,(hl)			;49f8
 	ld l,a			;49f9
 	ret			;49fa
-sub_49fbh:
+message_load_body_metadata:
+; Loads current-message body fields used by display and streaming code.
 	ld hl,(0882ah)		;49fb
 	ld de,block_0001_end		;49fe
 	add hl,de			;4a01
-block_0154_end:
-
-; BLOCK 'block_0155' (start 0x4a02 end 0x4a0b)
-block_0155_start:
-; high-bit-terminated text, ends at 0x4a0a: ^,V,~,fo'
-str_4a02_v_fo:
-	defb 05eh		;4a02
-	defb 02ch		;4a03
-	defb 056h		;4a04
-	defb 02ch		;4a05
-	defb 07eh		;4a06
-	defb 02ch		;4a07
-	defb 066h		;4a08
-	defb 06fh		;4a09
-	defb 0a7h		;4a0a
-block_0155_end:
-
-; BLOCK 'block_0156' (start 0x4a0b end 0x4a58)
-block_0156_start:
+	ld e,(hl)			;4a02
+	inc l			;4a03
+	ld d,(hl)			;4a04
+	inc l			;4a05
+	ld a,(hl)			;4a06
+	inc l			;4a07
+	ld h,(hl)			;4a08
+	ld l,a			;4a09
+	and a			;4a0a
 	sbc hl,de		;4a0b
 	ret			;4a0d
-sub_4a0eh:
+message_addressed_to_local_user:
+; Compares current user identity against configured callsigns.
 	ld a,(08820h)		;4a0e
 	or a			;4a11
 	ret m			;4a12
@@ -16066,7 +15976,8 @@ sub_4a2fh:
 	call sub_4a40h		;4a38
 	pop hl			;4a3b
 	ret			;4a3c
-sub_4a3dh:
+message_compare_callsign:
+; Compares six callsign bytes at HL against the current message field.
 	ld de,l0011h		;4a3d
 sub_4a40h:
 	push bc			;4a40
@@ -16090,366 +16001,195 @@ l4a55h:
 	pop bc			;4a55
 	and a			;4a56
 	ret			;4a57
-block_0156_end:
+; Parses recipient fields, allocates a message, and starts the editor.
+mailbox_send_command:
+	call sub_1516h		;4a58
+	jp nc,block_0133_end		;4a5b
+	xor a			;4a5e
+	ld (08832h),a		;4a5f
+	call mailbox_parse_send_recipient		;4a62
+	jp c,mailbox_response_dispatch		;4a65
+	call sub_153fh		;4a68
+	jp nc,l4af7h		;4a6b
+	ld a,(08841h)		;4a6e
+	or a			;4a71
+	jr z,block_0129_end		;4a72
+	ld de,block_0125_end		;4a74
+	ld hl,08a7fh		;4a77
+	call sub_6a95h		;4a7a
+	jr z,block_0129_end		;4a7d
+	ld a,(08078h)		;4a7f
+	or a			;4a82
+	jr z,l4a97h		;4a83
+	ld de,0807eh		;4a85
+	call sub_6a95h		;4a88
+	jr z,block_0129_end		;4a8b
+	ld de,0806eh		;4a8d
+	call sub_6a95h		;4a90
+	jr z,l4aa8h		;4a93
+	jr l4a9fh		;4a95
+l4a97h:
+	ld de,0806eh		;4a97
+	call sub_6a95h		;4a9a
+	jr z,block_0129_end		;4a9d
+l4a9fh:
+	ld a,(080afh)		;4a9f
+	and 010h		;4aa2
+	ld a,00ah		;4aa4
+	jr z,l4af4h		;4aa6
+l4aa8h:
+	xor a			;4aa8
+block_0128_end:
 
-; BLOCK 'block_0157' (start 0x4a58 end 0x4bb8)
-block_0157_start:
-	defb 0cdh		;4a58
-	defb 016h		;4a59
-	defb 015h		;4a5a
-	defb 0d2h		;4a5b
-	defb 062h		;4a5c
-	defb 04dh		;4a5d
-	defb 0afh		;4a5e
-	defb 032h		;4a5f
-	defb 032h		;4a60
-	defb 088h		;4a61
-	defb 0cdh		;4a62
-	defb 084h		;4a63
-	defb 04ch		;4a64
-	defb 0dah		;4a65
-	defb 067h		;4a66
-	defb 04dh		;4a67
-	defb 0cdh		;4a68
-	defb 03fh		;4a69
-	defb 015h		;4a6a
-	defb 0d2h		;4a6b
-	defb 0f7h		;4a6c
-	defb 04ah		;4a6d
-	defb 03ah		;4a6e
-	defb 041h		;4a6f
-	defb 088h		;4a70
-	defb 0b7h		;4a71
-	defb 028h		;4a72
-	defb 036h		;4a73
-	defb 011h		;4a74
-	defb 061h		;4a75
-	defb 048h		;4a76
-	defb 021h		;4a77
-	defb 07fh		;4a78
-	defb 08ah		;4a79
-	defb 0cdh		;4a7a
-	defb 095h		;4a7b
-	defb 06ah		;4a7c
-	defb 028h		;4a7d
-	defb 02bh		;4a7e
-	defb 03ah		;4a7f
-	defb 078h		;4a80
-	defb 080h		;4a81
-	defb 0b7h		;4a82
-	defb 028h		;4a83
-	defb 012h		;4a84
-	defb 011h		;4a85
-	defb 07eh		;4a86
-	defb 080h		;4a87
-	defb 0cdh		;4a88
-	defb 095h		;4a89
-	defb 06ah		;4a8a
-	defb 028h		;4a8b
-	defb 01dh		;4a8c
-	defb 011h		;4a8d
-	defb 06eh		;4a8e
-	defb 080h		;4a8f
-	defb 0cdh		;4a90
-	defb 095h		;4a91
-	defb 06ah		;4a92
-	defb 028h		;4a93
-	defb 013h		;4a94
-	defb 018h		;4a95
-	defb 008h		;4a96
-	defb 011h		;4a97
-	defb 06eh		;4a98
-	defb 080h		;4a99
-	defb 0cdh		;4a9a
-	defb 095h		;4a9b
-	defb 06ah		;4a9c
-	defb 028h		;4a9d
-	defb 00bh		;4a9e
-	defb 03ah		;4a9f
-	defb 0afh		;4aa0
-	defb 080h		;4aa1
-	defb 0e6h		;4aa2
-	defb 010h		;4aa3
-	defb 03eh		;4aa4
-	defb 00ah		;4aa5
-	defb 028h		;4aa6
-	defb 04ch		;4aa7
-	defb 0afh		;4aa8
+; BLOCK 'block_0129' (start 0x4aa9 end 0x4aaa)
+block_0129_start:
 	defb 021h		;4aa9
-	defb 03eh		;4aaa
-	defb 001h		;4aab
-	defb 032h		;4aac
-	defb 0abh		;4aad
-	defb 08ah		;4aae
-	defb 0cdh		;4aaf
-	defb 018h		;4ab0
-	defb 04dh		;4ab1
-	defb 030h		;4ab2
-	defb 00bh		;4ab3
-	defb 0cdh		;4ab4
-	defb 00bh		;4ab5
-	defb 044h		;4ab6
-	defb 030h		;4ab7
-	defb 03bh		;4ab8
-	defb 021h		;4ab9
-	defb 00fh		;4aba
-	defb 03dh		;4abb
-	defb 0c3h		;4abc
-	defb 071h		;4abd
-	defb 044h		;4abe
-	defb 0cdh		;4abf
-	defb 075h		;4ac0
-	defb 04ch		;4ac1
-	defb 03ah		;4ac2
-	defb 0abh		;4ac3
-	defb 08ah		;4ac4
-	defb 0b7h		;4ac5
-	defb 028h		;4ac6
-	defb 005h		;4ac7
-	defb 021h		;4ac8
-	defb 01ah		;4ac9
-	defb 080h		;4aca
-	defb 0cbh		;4acb
-	defb 0d6h		;4acc
-	defb 0cdh		;4acd
-	defb 086h		;4ace
-	defb 016h		;4acf
-	defb 021h		;4ad0
-	defb 079h		;4ad1
-	defb 08ah		;4ad2
-	defb 07eh		;4ad3
-	defb 0feh		;4ad4
-	defb 040h		;4ad5
-	defb 028h		;4ad6
-	defb 008h		;4ad7
-	defb 021h		;4ad8
-	defb 080h		;4ad9
-	defb 08ah		;4ada
-	defb 07eh		;4adb
-	defb 0feh		;4adc
-	defb 040h		;4add
-	defb 020h		;4ade
-	defb 003h		;4adf
-	defb 021h		;4ae0
-	defb 035h		;4ae1
-	defb 088h		;4ae2
-	defb 0e5h		;4ae3
-	defb 0cdh		;4ae4
-	defb 007h		;4ae5
-	defb 04dh		;4ae6
-	defb 03ah		;4ae7
-	defb 0abh		;4ae8
-	defb 08ah		;4ae9
-	defb 0b7h		;4aea
-	defb 020h		;4aeb
-	defb 003h		;4aec
-	defb 021h		;4aed
-	defb 079h		;4aee
-	defb 08ah		;4aef
-	defb 0e5h		;4af0
-	defb 0c3h		;4af1
-	defb 021h		;4af2
-	defb 04bh		;4af3
-	defb 0c3h		;4af4
-	defb 067h		;4af5
-	defb 04dh		;4af6
-	defb 03ah		;4af7
-	defb 041h		;4af8
-	defb 088h		;4af9
-	defb 0b7h		;4afa
-	defb 03eh		;4afb
-	defb 006h		;4afc
-	defb 028h		;4afd
-	defb 0f5h		;4afe
-	defb 0cdh		;4aff
-	defb 018h		;4b00
-	defb 04dh		;4b01
-	defb 038h		;4b02
-	defb 0f0h		;4b03
-	defb 0d7h		;4b04
-	defb 020h		;4b05
-	defb 00ah		;4b06
-	defb 0cdh		;4b07
-	defb 075h		;4b08
-	defb 04ch		;4b09
-	defb 021h		;4b0a
-	defb 024h		;4b0b
-	defb 088h		;4b0c
-	defb 0cbh		;4b0d
-	defb 0b6h		;4b0e
-	defb 0cbh		;4b0f
-	defb 0beh		;4b10
-	defb 021h		;4b11
-	defb 080h		;4b12
-	defb 08ah		;4b13
-	defb 07eh		;4b14
-	defb 0feh		;4b15
-	defb 040h		;4b16
-	defb 020h		;4b17
-	defb 003h		;4b18
-	defb 021h		;4b19
-	defb 068h		;4b1a
-	defb 080h		;4b1b
-	defb 0e5h		;4b1c
-	defb 021h		;4b1d
-	defb 079h		;4b1e
-	defb 08ah		;4b1f
-	defb 0e5h		;4b20
-	defb 02ah		;4b21
-	defb 02ah		;4b22
-	defb 088h		;4b23
-	defb 011h		;4b24
-	defb 011h		;4b25
-	defb 000h		;4b26
-	defb 019h		;4b27
-	defb 0ebh		;4b28
-	defb 0e1h		;4b29
-	defb 001h		;4b2a
-	defb 006h		;4b2b
-	defb 000h		;4b2c
-	defb 0edh		;4b2d
-	defb 0b0h		;4b2e
-	defb 0e1h		;4b2f
-	defb 001h		;4b30
-	defb 006h		;4b31
-	defb 000h		;4b32
-	defb 0edh		;4b33
-	defb 0b0h		;4b34
-	defb 03ah		;4b35
-	defb 08eh		;4b36
-	defb 08ah		;4b37
-	defb 0b7h		;4b38
-	defb 028h		;4b39
-	defb 022h		;4b3a
-	defb 0edh		;4b3b
-	defb 05bh		;4b3c
-	defb 02ah		;4b3d
-	defb 088h		;4b3e
-	defb 021h		;4b3f
-	defb 00eh		;4b40
-	defb 000h		;4b41
-	defb 019h		;4b42
-	defb 0cbh		;4b43
-	defb 0f6h		;4b44
-	defb 021h		;4b45
-	defb 004h		;4b46
-	defb 000h		;4b47
-	defb 019h		;4b48
-	defb 0ebh		;4b49
-	defb 0cdh		;4b4a
-	defb 0fdh		;4b4b
-	defb 016h		;4b4c
-	defb 0cdh		;4b4d
-	defb 0e0h		;4b4e
-	defb 016h		;4b4f
-	defb 0fbh		;4b50
-	defb 0cdh		;4b51
-	defb 07ah		;4b52
-	defb 045h		;4b53
-	defb 0ebh		;4b54
-	defb 021h		;4b55
-	defb 08eh		;4b56
-	defb 08ah		;4b57
-	defb 001h		;4b58
-	defb 01ch		;4b59
-	defb 000h		;4b5a
-	defb 0edh		;4b5b
-	defb 0b0h		;4b5c
-	defb 0edh		;4b5d
-	defb 05bh		;4b5e
-	defb 0feh		;4b5f
-	defb 08fh		;4b60
-	defb 021h		;4b61
-	defb 0e0h		;4b62
-	defb 088h		;4b63
-	defb 006h		;4b64
-	defb 005h		;4b65
-	defb 07eh		;4b66
-	defb 023h		;4b67
-	defb 0cdh		;4b68
-	defb 0feh		;4b69
-	defb 017h		;4b6a
-	defb 0fbh		;4b6b
-	defb 010h		;4b6c
-	defb 0f8h		;4b6d
-	defb 0cdh		;4b6e
-	defb 012h		;4b6f
-	defb 04ch		;4b70
-	defb 021h		;4b71
-	defb 01ah		;4b72
-	defb 080h		;4b73
-	defb 0cbh		;4b74
-	defb 09eh		;4b75
-	defb 0cbh		;4b76
-	defb 086h		;4b77
-	defb 0cdh		;4b78
-	defb 063h		;4b79
-	defb 015h		;4b7a
-	defb 030h		;4b7b
-	defb 006h		;4b7c
-	defb 03eh		;4b7d
-	defb 053h		;4b7e
-	defb 032h		;4b7f
-	defb 028h		;4b80
-	defb 088h		;4b81
-	defb 0c9h		;4b82
-	defb 03eh		;4b83
-	defb 073h		;4b84
-	defb 032h		;4b85
-	defb 028h		;4b86
-	defb 088h		;4b87
-	defb 0cdh		;4b88
-	defb 00bh		;4b89
-	defb 044h		;4b8a
-	defb 021h		;4b8b
-	defb 0c3h		;4b8c
-	defb 04dh		;4b8d
-	defb 0dah		;4b8e
-	defb 0d2h		;4b8f
-	defb 03ch		;4b90
-	defb 021h		;4b91
-	defb 083h		;4b92
-	defb 083h		;4b93
-	defb 054h		;4b94
-	defb 05dh		;4b95
-	defb 07eh		;4b96
-	defb 023h		;4b97
-	defb 0feh		;4b98
-	defb 02fh		;4b99
-	defb 028h		;4b9a
-	defb 009h		;4b9b
-	defb 0feh		;4b9c
-	defb 08dh		;4b9d
-	defb 020h		;4b9e
-	defb 0f6h		;4b9f
-	defb 021h		;4ba0
-	defb 0d3h		;4ba1
-	defb 002h		;4ba2
-	defb 018h		;4ba3
-	defb 002h		;4ba4
-	defb 062h		;4ba5
-	defb 06bh		;4ba6
-	defb 07eh		;4ba7
-	defb 023h		;4ba8
-	defb 0feh		;4ba9
-	defb 02fh		;4baa
-	defb 028h		;4bab
-	defb 005h		;4bac
-	defb 0cdh		;4bad
-	defb 004h		;4bae
-	defb 013h		;4baf
-	defb 018h		;4bb0
-	defb 0f5h		;4bb1
-	defb 0cdh		;4bb2
-	defb 002h		;4bb3
-	defb 013h		;4bb4
-	defb 0c3h		;4bb5
-	defb 0adh		;4bb6
-	defb 016h		;4bb7
-block_0157_end:
+block_0129_end:
 
-; BLOCK 'block_0158' (start 0x4bb8 end 0x4c12)
-block_0158_start:
+; BLOCK 'block_0130' (start 0x4aaa end 0x4d11)
+block_0130_start:
+	ld a,001h		;4aaa
+	ld (08aabh),a		;4aac
+	call block_0131_end		;4aaf
+	jr nc,l4abfh		;4ab2
+	call block_0109_end		;4ab4
+	jr nc,l4af4h		;4ab7
+	ld hl,l3d0fh		;4ab9
+	jp l4471h		;4abc
+l4abfh:
+	call message_set_type_flags		;4abf
+	ld a,(08aabh)		;4ac2
+	or a			;4ac5
+	jr z,l4acdh		;4ac6
+	ld hl,0801ah		;4ac8
+	set 2,(hl)		;4acb
+l4acdh:
+	call sub_1686h		;4acd
+	ld hl,08a79h		;4ad0
+	ld a,(hl)			;4ad3
+	cp 040h		;4ad4
+	jr z,l4ae0h		;4ad6
+	ld hl,08a80h		;4ad8
+	ld a,(hl)			;4adb
+	cp 040h		;4adc
+	jr nz,l4ae3h		;4ade
+l4ae0h:
+	ld hl,08835h		;4ae0
+l4ae3h:
+	push hl			;4ae3
+	call get_local_bbs_callsign		;4ae4
+	ld a,(08aabh)		;4ae7
+	or a			;4aea
+	jr nz,l4af0h		;4aeb
+	ld hl,08a79h		;4aed
+l4af0h:
+	push hl			;4af0
+	jp l4b21h		;4af1
+l4af4h:
+	jp mailbox_response_dispatch		;4af4
+l4af7h:
+	ld a,(08841h)		;4af7
+	or a			;4afa
+	ld a,006h		;4afb
+	jr z,l4af4h		;4afd
+	call block_0131_end		;4aff
+	jr c,l4af4h		;4b02
+	rst 10h			;4b04
+	jr nz,l4b11h		;4b05
+	call message_set_type_flags		;4b07
+	ld hl,08824h		;4b0a
+	res 6,(hl)		;4b0d
+	res 7,(hl)		;4b0f
+l4b11h:
+	ld hl,08a80h		;4b11
+	ld a,(hl)			;4b14
+	cp 040h		;4b15
+	jr nz,l4b1ch		;4b17
+	ld hl,08068h		;4b19
+l4b1ch:
+	push hl			;4b1c
+	ld hl,08a79h		;4b1d
+	push hl			;4b20
+l4b21h:
+	ld hl,(0882ah)		;4b21
+	ld de,l0011h		;4b24
+	add hl,de			;4b27
+	ex de,hl			;4b28
+	pop hl			;4b29
+	ld bc,block_0000_end		;4b2a
+	ldir		;4b2d
+	pop hl			;4b2f
+	ld bc,block_0000_end		;4b30
+	ldir		;4b33
+	ld a,(08a8eh)		;4b35
+	or a			;4b38
+	jr z,l4b5dh		;4b39
+	ld de,(0882ah)		;4b3b
+	ld hl,l000eh		;4b3f
+	add hl,de			;4b42
+	set 6,(hl)		;4b43
+	ld hl,l0003h+1		;4b45
+	add hl,de			;4b48
+	ex de,hl			;4b49
+	call sub_16fdh		;4b4a
+	call list_insert_node		;4b4d
+	ei			;4b50
+	call message_get_address_field		;4b51
+	ex de,hl			;4b54
+	ld hl,08a8eh		;4b55
+	ld bc,l001ch		;4b58
+	ldir		;4b5b
+l4b5dh:
+	ld de,(08ffeh)		;4b5d
+	ld hl,088e0h		;4b61
+	ld b,005h		;4b64
+l4b66h:
+	ld a,(hl)			;4b66
+	inc hl			;4b67
+	call queue_increment_counter_and_put		;4b68
+	ei			;4b6b
+	djnz l4b66h		;4b6c
+	call mailbox_store_bid_extension		;4b6e
+	ld hl,0801ah		;4b71
+	res 3,(hl)		;4b74
+	res 0,(hl)		;4b76
+	call sub_1563h		;4b78
+	jr nc,l4b83h		;4b7b
+	ld a,053h		;4b7d
+	ld (08828h),a		;4b7f
+	ret			;4b82
+l4b83h:
+	ld a,073h		;4b83
+	ld (08828h),a		;4b85
+	call block_0109_end		;4b88
+	ld hl,l4dc3h		;4b8b
+	jp c,l3cd2h		;4b8e
+	ld hl,08383h		;4b91
+	ld d,h			;4b94
+	ld e,l			;4b95
+l4b96h:
+	ld a,(hl)			;4b96
+	inc hl			;4b97
+	cp 02fh		;4b98
+	jr z,l4ba5h		;4b9a
+	cp 08dh		;4b9c
+	jr nz,l4b96h		;4b9e
+	ld hl,l02d3h		;4ba0
+	jr l4ba7h		;4ba3
+l4ba5h:
+	ld h,d			;4ba5
+	ld l,e			;4ba6
+l4ba7h:
+	ld a,(hl)			;4ba7
+	inc hl			;4ba8
+	cp 02fh		;4ba9
+	jr z,l4bb2h		;4bab
+	call console_putchar_routed		;4bad
+	jr l4ba7h		;4bb0
+l4bb2h:
+	call print_carriage_return		;4bb2
+	jp l16adh		;4bb5
+l4bb8h:
 	ld hl,0801ch		;4bb8
 	set 2,(hl)		;4bbb
 	jp l44c3h		;4bbd
@@ -16458,16 +16198,16 @@ sub_4bc0h:
 	and 0dfh		;4bc3
 	cp 0d3h		;4bc5
 	ret nz			;4bc7
-	call sub_49a2h		;4bc8
+	call mailbox_connection_ready_test		;4bc8
 	ei			;4bcb
 	ret nz			;4bcc
 	ld hl,08828h		;4bcd
 	ld a,(hl)			;4bd0
 	cp 0d3h		;4bd1
-	jr z,block_0157_end		;4bd3
+	jr z,l4bb8h		;4bd3
 	ld (hl),053h		;4bd5
 	call sub_1686h		;4bd7
-	call block_0137_end		;4bda
+	call block_0109_end		;4bda
 	jr c,l4bfbh		;4bdd
 	ld hl,08383h		;4bdf
 	ld d,h			;4be2
@@ -16487,10 +16227,11 @@ l4bf0h:
 	jr nz,l4bf8h		;4bf3
 	ld hl,l02dch		;4bf5
 l4bf8h:
-	call sub_135ch		;4bf8
+	call console_puts_highbit		;4bf8
 l4bfbh:
 	jp l3cdfh		;4bfb
-sub_4bfeh:
+mailbox_abort_pending_storage:
+; Releases pending message storage and selects an error response.
 	ld hl,0801ah		;4bfe
 	bit 0,(hl)		;4c01
 	ret z			;4c03
@@ -16499,266 +16240,163 @@ sub_4bfeh:
 	call sub_16cah		;4c09
 	ei			;4c0c
 	ld a,013h		;4c0d
-	jp block_0159_end		;4c0f
-block_0158_end:
+	jp mailbox_response_dispatch		;4c0f
+mailbox_store_bid_extension:
+; Parses and stores an optional '$' BID extension.
+	ld bc,(0883fh)		;4c12
+	ld a,(bc)			;4c16
+	cp 024h		;4c17
+	ret nz			;4c19
+	inc bc			;4c1a
+	ld de,(08ffeh)		;4c1b
+	ld hl,l000eh		;4c1f
+	add hl,de			;4c22
+	set 5,(hl)		;4c23
+	ld a,(bc)			;4c25
+	call is_token_delimiter		;4c26
+	jr z,l4c40h		;4c29
+l4c2bh:
+	call queue_increment_counter_and_put		;4c2b
+	ei			;4c2e
+	inc bc			;4c2f
+	ld a,(bc)			;4c30
+	call is_token_delimiter		;4c31
+	jr nz,l4c2bh		;4c34
+l4c36h:
+	xor a			;4c36
+	ld de,(08ffeh)		;4c37
+	call queue_increment_counter_and_put		;4c3b
+	ei			;4c3e
+	ret			;4c3f
+l4c40h:
+	call message_get_number		;4c40
+	call mailbox_send_decimal_to_peer		;4c43
+	call get_local_bbs_callsign		;4c46
+	ld b,007h		;4c49
+	ld a,05fh		;4c4b
+	jr l4c53h		;4c4d
+l4c4fh:
+	ld a,(hl)			;4c4f
+	inc hl			;4c50
+	srl a		;4c51
+l4c53h:
+	cp 020h		;4c53
+	call nz,queue_increment_counter_and_put		;4c55
+	ei			;4c58
+	djnz l4c4fh		;4c59
+	jr l4c36h		;4c5b
+mailbox_send_decimal_to_peer:
+; Prints decimal digits through the connected-peer output path.
+	push de			;4c5d
+	push hl			;4c5e
+	call prepare_unsigned_divide_by_10		;4c5f
+	ld a,h			;4c62
+	or l			;4c63
+	call nz,mailbox_send_decimal_to_peer		;4c64
+	ld a,e			;4c67
+	or 030h		;4c68
+	ld de,(08ffeh)		;4c6a
+	call queue_increment_counter_and_put		;4c6e
+	ei			;4c71
+	pop hl			;4c72
+	pop de			;4c73
+	ret			;4c74
+message_set_type_flags:
+; Sets bulletin or traffic flags from command byte B/T/P.
+	ld a,(08829h)		;4c75
+	cp 042h		;4c78
+	jr nz,l4c7eh		;4c7a
+	set 3,(hl)		;4c7c
+l4c7eh:
+	cp 054h		;4c7e
+	ret nz			;4c80
+	set 2,(hl)		;4c81
+	ret			;4c83
+mailbox_parse_send_recipient:
+; Parses send recipient and optional route fields into callsign buffers.
+	ld de,08a79h		;4c84
+	ld hl,block_0130_end		;4c87
+	ld bc,l0007h		;4c8a
+	ldir		;4c8d
+	ld hl,block_0130_end		;4c8f
+	ld c,007h		;4c92
+	ldir		;4c94
+	xor a			;4c96
+	ld (08a8eh),a		;4c97
+	ld hl,08a79h		;4c9a
+	ld (08845h),hl		;4c9d
+	call mailbox_parse_optional_message_number		;4ca0
+l4ca3h:
+	ret z			;4ca3
+	ld c,002h		;4ca4
+	call sub_38beh		;4ca6
+	ld a,040h		;4ca9
+	ld (de),a			;4cab
+	jr c,l4cech		;4cac
+l4caeh:
+	call sub_3367h		;4cae
+	cp 00dh		;4cb1
+	ret z			;4cb3
+	cp 024h		;4cb4
+	ret z			;4cb6
+	ld hl,08a80h		;4cb7
+	cp 03ch		;4cba
+	jr z,l4ce7h		;4cbc
+	ld hl,08a8eh		;4cbe
+	cp 040h		;4cc1
+	jr nz,l4caeh		;4cc3
+	call sub_4cfeh		;4cc5
+	ret z			;4cc8
+	ld hl,(0883fh)		;4cc9
+	ld de,(08845h)		;4ccc
+	ld b,01bh		;4cd0
+l4cd2h:
+	ld a,(hl)			;4cd2
+	call ascii_to_uppercase		;4cd3
+	call is_token_delimiter		;4cd6
+	jr z,l4ce0h		;4cd9
+	ld (de),a			;4cdb
+	inc de			;4cdc
+	inc hl			;4cdd
+	djnz l4cd2h		;4cde
+l4ce0h:
+	ld (0883fh),hl		;4ce0
+	xor a			;4ce3
+	ld (de),a			;4ce4
+	jr l4caeh		;4ce5
+l4ce7h:
+	call sub_4cfeh		;4ce7
+	jr l4ca3h		;4cea
+l4cech:
+	ld a,006h		;4cec
+	ret			;4cee
+mailbox_parse_optional_message_number:
+; Parses and validates an optional numeric message argument.
+	rst 10h			;4cef
+	jr z,sub_4cfeh		;4cf0
+	call sub_1553h		;4cf2
+	jr c,sub_4cfeh		;4cf5
+	call sub_3355h		;4cf7
+	ld a,(hl)			;4cfa
+	cp 08dh		;4cfb
+	ret			;4cfd
+sub_4cfeh:
+	ld (08845h),hl		;4cfe
+	call sub_3367h		;4d01
+	cp 00dh		;4d04
+	ret			;4d06
+get_local_bbs_callsign:
+; Returns the configured BBS callsign or falls back to the local callsign.
+	ld hl,08078h		;4d07
+	ld a,(hl)			;4d0a
+	or a			;4d0b
+	ret nz			;4d0c
+	ld hl,08068h		;4d0d
+	ret			;4d10
+block_0130_end:
 
-; BLOCK 'block_0159' (start 0x4c12 end 0x4d67)
-block_0159_start:
-	defb 0edh		;4c12
-	defb 04bh		;4c13
-	defb 03fh		;4c14
-	defb 088h		;4c15
-	defb 00ah		;4c16
-	defb 0feh		;4c17
-	defb 024h		;4c18
-	defb 0c0h		;4c19
-	defb 003h		;4c1a
-	defb 0edh		;4c1b
-	defb 05bh		;4c1c
-	defb 0feh		;4c1d
-	defb 08fh		;4c1e
-	defb 021h		;4c1f
-	defb 00eh		;4c20
-	defb 000h		;4c21
-	defb 019h		;4c22
-	defb 0cbh		;4c23
-	defb 0eeh		;4c24
-	defb 00ah		;4c25
-	defb 0cdh		;4c26
-	defb 078h		;4c27
-	defb 013h		;4c28
-	defb 028h		;4c29
-	defb 015h		;4c2a
-	defb 0cdh		;4c2b
-	defb 0feh		;4c2c
-	defb 017h		;4c2d
-	defb 0fbh		;4c2e
-	defb 003h		;4c2f
-	defb 00ah		;4c30
-	defb 0cdh		;4c31
-	defb 078h		;4c32
-	defb 013h		;4c33
-	defb 020h		;4c34
-	defb 0f5h		;4c35
-	defb 0afh		;4c36
-	defb 0edh		;4c37
-	defb 05bh		;4c38
-	defb 0feh		;4c39
-	defb 08fh		;4c3a
-	defb 0cdh		;4c3b
-	defb 0feh		;4c3c
-	defb 017h		;4c3d
-	defb 0fbh		;4c3e
-	defb 0c9h		;4c3f
-	defb 0cdh		;4c40
-	defb 0f2h		;4c41
-	defb 049h		;4c42
-	defb 0cdh		;4c43
-	defb 05dh		;4c44
-	defb 04ch		;4c45
-	defb 0cdh		;4c46
-	defb 007h		;4c47
-	defb 04dh		;4c48
-	defb 006h		;4c49
-	defb 007h		;4c4a
-	defb 03eh		;4c4b
-	defb 05fh		;4c4c
-	defb 018h		;4c4d
-	defb 004h		;4c4e
-	defb 07eh		;4c4f
-	defb 023h		;4c50
-	defb 0cbh		;4c51
-	defb 03fh		;4c52
-	defb 0feh		;4c53
-	defb 020h		;4c54
-	defb 0c4h		;4c55
-	defb 0feh		;4c56
-	defb 017h		;4c57
-	defb 0fbh		;4c58
-	defb 010h		;4c59
-	defb 0f4h		;4c5a
-	defb 018h		;4c5b
-	defb 0d9h		;4c5c
-	defb 0d5h		;4c5d
-	defb 0e5h		;4c5e
-	defb 0cdh		;4c5f
-	defb 0a8h		;4c60
-	defb 011h		;4c61
-	defb 07ch		;4c62
-	defb 0b5h		;4c63
-	defb 0c4h		;4c64
-	defb 05dh		;4c65
-	defb 04ch		;4c66
-	defb 07bh		;4c67
-	defb 0f6h		;4c68
-	defb 030h		;4c69
-	defb 0edh		;4c6a
-	defb 05bh		;4c6b
-	defb 0feh		;4c6c
-	defb 08fh		;4c6d
-	defb 0cdh		;4c6e
-	defb 0feh		;4c6f
-	defb 017h		;4c70
-	defb 0fbh		;4c71
-	defb 0e1h		;4c72
-	defb 0d1h		;4c73
-	defb 0c9h		;4c74
-	defb 03ah		;4c75
-	defb 029h		;4c76
-	defb 088h		;4c77
-	defb 0feh		;4c78
-	defb 042h		;4c79
-	defb 020h		;4c7a
-	defb 002h		;4c7b
-	defb 0cbh		;4c7c
-	defb 0deh		;4c7d
-	defb 0feh		;4c7e
-	defb 054h		;4c7f
-	defb 0c0h		;4c80
-	defb 0cbh		;4c81
-	defb 0d6h		;4c82
-	defb 0c9h		;4c83
-	defb 011h		;4c84
-	defb 079h		;4c85
-	defb 08ah		;4c86
-	defb 021h		;4c87
-	defb 011h		;4c88
-	defb 04dh		;4c89
-	defb 001h		;4c8a
-	defb 007h		;4c8b
-	defb 000h		;4c8c
-	defb 0edh		;4c8d
-	defb 0b0h		;4c8e
-	defb 021h		;4c8f
-	defb 011h		;4c90
-	defb 04dh		;4c91
-	defb 00eh		;4c92
-	defb 007h		;4c93
-	defb 0edh		;4c94
-	defb 0b0h		;4c95
-	defb 0afh		;4c96
-	defb 032h		;4c97
-	defb 08eh		;4c98
-	defb 08ah		;4c99
-	defb 021h		;4c9a
-	defb 079h		;4c9b
-	defb 08ah		;4c9c
-	defb 022h		;4c9d
-	defb 045h		;4c9e
-	defb 088h		;4c9f
-	defb 0cdh		;4ca0
-	defb 0efh		;4ca1
-	defb 04ch		;4ca2
-	defb 0c8h		;4ca3
-	defb 00eh		;4ca4
-	defb 002h		;4ca5
-	defb 0cdh		;4ca6
-	defb 0beh		;4ca7
-	defb 038h		;4ca8
-	defb 03eh		;4ca9
-	defb 040h		;4caa
-	defb 012h		;4cab
-	defb 038h		;4cac
-	defb 03eh		;4cad
-	defb 0cdh		;4cae
-	defb 067h		;4caf
-	defb 033h		;4cb0
-	defb 0feh		;4cb1
-	defb 00dh		;4cb2
-	defb 0c8h		;4cb3
-	defb 0feh		;4cb4
-	defb 024h		;4cb5
-	defb 0c8h		;4cb6
-	defb 021h		;4cb7
-	defb 080h		;4cb8
-	defb 08ah		;4cb9
-	defb 0feh		;4cba
-	defb 03ch		;4cbb
-	defb 028h		;4cbc
-	defb 029h		;4cbd
-	defb 021h		;4cbe
-	defb 08eh		;4cbf
-	defb 08ah		;4cc0
-	defb 0feh		;4cc1
-	defb 040h		;4cc2
-	defb 020h		;4cc3
-	defb 0e9h		;4cc4
-	defb 0cdh		;4cc5
-	defb 0feh		;4cc6
-	defb 04ch		;4cc7
-	defb 0c8h		;4cc8
-	defb 02ah		;4cc9
-	defb 03fh		;4cca
-	defb 088h		;4ccb
-	defb 0edh		;4ccc
-	defb 05bh		;4ccd
-	defb 045h		;4cce
-	defb 088h		;4ccf
-	defb 006h		;4cd0
-	defb 01bh		;4cd1
-	defb 07eh		;4cd2
-	defb 0cdh		;4cd3
-	defb 06dh		;4cd4
-	defb 013h		;4cd5
-	defb 0cdh		;4cd6
-	defb 078h		;4cd7
-	defb 013h		;4cd8
-	defb 028h		;4cd9
-	defb 005h		;4cda
-	defb 012h		;4cdb
-	defb 013h		;4cdc
-	defb 023h		;4cdd
-	defb 010h		;4cde
-	defb 0f2h		;4cdf
-	defb 022h		;4ce0
-	defb 03fh		;4ce1
-	defb 088h		;4ce2
-	defb 0afh		;4ce3
-	defb 012h		;4ce4
-	defb 018h		;4ce5
-	defb 0c7h		;4ce6
-	defb 0cdh		;4ce7
-	defb 0feh		;4ce8
-	defb 04ch		;4ce9
-	defb 018h		;4cea
-	defb 0b7h		;4ceb
-	defb 03eh		;4cec
-	defb 006h		;4ced
-	defb 0c9h		;4cee
-	defb 0d7h		;4cef
-	defb 028h		;4cf0
-	defb 00ch		;4cf1
-	defb 0cdh		;4cf2
-	defb 053h		;4cf3
-	defb 015h		;4cf4
-	defb 038h		;4cf5
-	defb 007h		;4cf6
-	defb 0cdh		;4cf7
-	defb 055h		;4cf8
-	defb 033h		;4cf9
-	defb 07eh		;4cfa
-	defb 0feh		;4cfb
-	defb 08dh		;4cfc
-	defb 0c9h		;4cfd
-	defb 022h		;4cfe
-	defb 045h		;4cff
-	defb 088h		;4d00
-	defb 0cdh		;4d01
-	defb 067h		;4d02
-	defb 033h		;4d03
-	defb 0feh		;4d04
-	defb 00dh		;4d05
-	defb 0c9h		;4d06
-	defb 021h		;4d07
-	defb 078h		;4d08
-	defb 080h		;4d09
-	defb 07eh		;4d0a
-	defb 0b7h		;4d0b
-	defb 0c0h		;4d0c
-	defb 021h		;4d0d
-	defb 068h		;4d0e
-	defb 080h		;4d0f
-	defb 0c9h		;4d10
+; BLOCK 'block_0131' (start 0x4d11 end 0x4d18)
+block_0131_start:
 	defb 040h		;4d11
 	defb 040h		;4d12
 	defb 040h		;4d13
@@ -16766,97 +16404,72 @@ block_0159_start:
 	defb 040h		;4d15
 	defb 040h		;4d16
 	defb 060h		;4d17
-	defb 0cdh		;4d18
-	defb 057h		;4d19
-	defb 04dh		;4d1a
-	defb 03eh		;4d1b
-	defb 013h		;4d1c
-	defb 0d8h		;4d1d
-	defb 0edh		;4d1e
-	defb 04bh		;4d1f
-	defb 01eh		;4d20
-	defb 088h		;4d21
-	defb 003h		;4d22
-	defb 021h		;4d23
-	defb 0e7h		;4d24
-	defb 003h		;4d25
-	defb 0a7h		;4d26
-	defb 0edh		;4d27
-	defb 042h		;4d28
-	defb 030h		;4d29
-	defb 003h		;4d2a
-	defb 001h		;4d2b
-	defb 001h		;4d2c
-	defb 000h		;4d2d
-	defb 0cdh		;4d2e
-	defb 0cfh		;4d2f
-	defb 049h		;4d30
-	defb 030h		;4d31
-	defb 0efh		;4d32
-	defb 0edh		;4d33
-	defb 043h		;4d34
-	defb 01eh		;4d35
-	defb 088h		;4d36
-	defb 0edh		;4d37
-	defb 05bh		;4d38
-	defb 0feh		;4d39
-	defb 08fh		;4d3a
-	defb 0cdh		;4d3b
-	defb 0f9h		;4d3c
-	defb 017h		;4d3d
-	defb 0fbh		;4d3e
-	defb 0edh		;4d3f
-	defb 05bh		;4d40
-	defb 0feh		;4d41
-	defb 08fh		;4d42
-	defb 0edh		;4d43
-	defb 053h		;4d44
-	defb 02ah		;4d45
-	defb 088h		;4d46
-	defb 021h		;4d47
-	defb 00fh		;4d48
-	defb 000h		;4d49
-	defb 019h		;4d4a
-	defb 071h		;4d4b
-	defb 02ch		;4d4c
-	defb 070h		;4d4d
-	defb 021h		;4d4e
-	defb 00eh		;4d4f
-	defb 000h		;4d50
-	defb 019h		;4d51
-	defb 07eh		;4d52
-	defb 0e6h		;4d53
-	defb 081h		;4d54
-	defb 077h		;4d55
-	defb 0c9h		;4d56
-	defb 02ah		;4d57
-	defb 02ch		;4d58
-	defb 088h		;4d59
-	defb 011h		;4d5a
-	defb 057h		;4d5b
-	defb 0fdh		;4d5c
-	defb 019h		;4d5d
-	defb 0c9h		;4d5e
+block_0131_end:
+
+; BLOCK 'block_0132' (start 0x4d18 end 0x4d5f)
+block_0132_start:
+; Allocates and numbers a mailbox message record; carry reports failure.
+mailbox_allocate_message:
+	call mailbox_space_available_test		;4d18
+	ld a,013h		;4d1b
+	ret c			;4d1d
+	ld bc,(0881eh)		;4d1e
+l4d22h:
+	inc bc			;4d22
+	ld hl,003e7h		;4d23
+	and a			;4d26
+	sbc hl,bc		;4d27
+	jr nc,l4d2eh		;4d29
+	ld bc,l0001h		;4d2b
+l4d2eh:
+	call block_0127_end		;4d2e
+	jr nc,l4d22h		;4d31
+	ld (0881eh),bc		;4d33
+	ld de,(08ffeh)		;4d37
+	call queue_rotate_or_allocate		;4d3b
+	ei			;4d3e
+	ld de,(08ffeh)		;4d3f
+	ld (0882ah),de		;4d43
+	ld hl,l000fh		;4d47
+	add hl,de			;4d4a
+	ld (hl),c			;4d4b
+	inc l			;4d4c
+	ld (hl),b			;4d4d
+	ld hl,l000eh		;4d4e
+	add hl,de			;4d51
+	ld a,(hl)			;4d52
+	and 081h		;4d53
+	ld (hl),a			;4d55
+	ret			;4d56
+mailbox_space_available_test:
+; Compares computed mailbox free space against the required amount.
+	ld hl,(0882ch)		;4d57
+	ld de,0fd57h		;4d5a
+	add hl,de			;4d5d
+	ret			;4d5e
+block_0132_end:
+
+; BLOCK 'block_0133' (start 0x4d5f end 0x4d62)
+block_0133_start:
 	defb 03eh		;4d5f
 	defb 009h		;4d60
 	defb 021h		;4d61
-	defb 03eh		;4d62
-	defb 007h		;4d63
-	defb 0c3h		;4d64
-	defb 0a4h		;4d65
-	defb 030h		;4d66
-block_0159_end:
+block_0133_end:
 
-; BLOCK 'block_0160' (start 0x4d67 end 0x4d95)
-block_0160_start:
+; BLOCK 'block_0134' (start 0x4d62 end 0x4d95)
+block_0134_start:
+	ld a,007h		;4d62
+	jp block_0075_end		;4d64
+mailbox_response_dispatch:
+; Prints a mailbox response selected by index A.
 	ld hl,08828h		;4d67
 	ld (hl),000h		;4d6a
-	ld de,block_0160_end		;4d6c
+	ld de,block_0134_end		;4d6c
 	call sub_1563h		;4d6f
 	jr nc,l4d7bh		;4d72
 	ld hl,l2b94h		;4d74
 	ex (sp),hl			;4d77
-	jp block_0099_end		;4d78
+	jp block_0069_end		;4d78
 l4d7bh:
 	ld h,000h		;4d7b
 	ld l,a			;4d7d
@@ -16869,14 +16482,14 @@ l4d7bh:
 	call sub_1686h		;4d84
 	push hl			;4d87
 	ld hl,l4dbfh		;4d88
-	call sub_135ch		;4d8b
+	call console_puts_highbit		;4d8b
 	pop hl			;4d8e
-	call sub_135ch		;4d8f
+	call console_puts_highbit		;4d8f
 	jp l16adh		;4d92
-block_0160_end:
+block_0134_end:
 
-; BLOCK 'block_0161' (start 0x4d95 end 0x4e85)
-block_0161_start:
+; BLOCK 'block_0135' (start 0x4d95 end 0x4e85)
+block_0135_start:
 	defb 0c6h		;4d95
 	defb 04dh		;4d96
 	defb 0cch		;4d97
@@ -16926,6 +16539,7 @@ l4dbfh:
 	defb 02ah		;4dc0
 	defb 02ah		;4dc1
 	defb 0a0h		;4dc2
+l4dc3h:
 	defb 04fh		;4dc3
 	defb 04bh		;4dc4
 	defb 0a0h		;4dc5
@@ -17146,10 +16760,12 @@ str_4e73_must_be_yes_or:
 	defb 06eh		;4e82
 	defb 06fh		;4e83
 	defb 0a0h		;4e84
-block_0161_end:
+block_0135_end:
 
-; BLOCK 'block_0162' (start 0x4e85 end 0x4ea3)
-block_0162_start:
+; BLOCK 'block_0136' (start 0x4e85 end 0x4ea3)
+block_0136_start:
+; Tentative: updates a selected saturating message-status counter.
+message_status_counter_update:
 	push de			;4e85
 	push hl			;4e86
 	ld de,0caceh		;4e87
@@ -17171,10 +16787,10 @@ l4e9fh:
 	ld (hl),a			;4ea0
 	pop de			;4ea1
 	ret			;4ea2
-block_0162_end:
+block_0136_end:
 
-; BLOCK 'block_0163' (start 0x4ea3 end 0x4ee0)
-block_0163_start:
+; BLOCK 'block_0137' (start 0x4ea3 end 0x4ee0)
+block_0137_start:
 	defb 001h		;4ea3
 	defb 001h		;4ea4
 	defb 001h		;4ea5
@@ -17236,10 +16852,10 @@ block_0163_start:
 	defb 002h		;4edd
 	defb 003h		;4ede
 	defb 004h		;4edf
-block_0163_end:
+block_0137_end:
 
-; BLOCK 'block_0164' (start 0x4ee0 end 0x51fc)
-block_0164_start:
+; BLOCK 'block_0138' (start 0x4ee0 end 0x51fc)
+block_0138_start:
 	ld hl,0800bh		;4ee0
 	bit 5,(hl)		;4ee3
 	res 5,(hl)		;4ee5
@@ -17264,7 +16880,7 @@ l4f04h:
 	cp 00dh		;4f09
 	jr z,l4f3bh		;4f0b
 l4f0dh:
-	call sub_4f5dh		;4f0d
+	call terminal_echo_character		;4f0d
 	ret c			;4f10
 	ld a,(080adh)		;4f11
 	and 010h		;4f14
@@ -17293,9 +16909,9 @@ l4f3bh:
 	ld (08008h),a		;4f3d
 	ld a,b			;4f40
 l4f41h:
-	call sub_4f5dh		;4f41
+	call terminal_echo_character		;4f41
 l4f44h:
-	jp sub_1022h		;4f44
+	jp block_0035_end		;4f44
 l4f47h:
 	ld hl,0800bh		;4f47
 	set 5,(hl)		;4f4a
@@ -17310,8 +16926,9 @@ l4f55h:
 	bit 4,(hl)		;4f58
 	jr z,l4f0dh		;4f5a
 	ret			;4f5c
-sub_4f5dh:
-	call sub_0056h		;4f5d
+terminal_echo_character:
+; Applies local echo and CR/LF translation to character A.
+	call translate_escape_character		;4f5d
 	ld hl,080abh		;4f60
 	bit 1,(hl)		;4f63
 	jr z,l4f81h		;4f65
@@ -17324,24 +16941,26 @@ sub_4f5dh:
 	jr z,l4f81h		;4f73
 	cp 00dh		;4f75
 	jr nz,l4f7eh		;4f77
-	call sub_111bh		;4f79
+	call terminal_tx_enqueue_raw		;4f79
 	ld a,00ah		;4f7c
 l4f7eh:
-	call sub_111bh		;4f7e
+	call terminal_tx_enqueue_raw		;4f7e
 l4f81h:
 	and a			;4f81
 	ret			;4f82
-sub_4f83h:
-	call sub_4f9eh		;4f83
-	call sub_574eh		;4f86
-	call sub_4f9eh		;4f89
+serial_service_dispatch:
+; Runs several serial hardware services separated by input-queue draining.
+	call serial_input_queue_drain		;4f83
+	call service_scc_a_tx_pending		;4f86
+	call serial_input_queue_drain		;4f89
 	call sub_5257h		;4f8c
-	call sub_4f9eh		;4f8f
+	call serial_input_queue_drain		;4f8f
 	call sub_519eh		;4f92
-	call sub_4f9eh		;4f95
-	call sub_5882h		;4f98
-	call block_0167_end		;4f9b
-sub_4f9eh:
+	call serial_input_queue_drain		;4f95
+	call update_scc_a_rts_ptt		;4f98
+	call block_0141_end		;4f9b
+serial_input_queue_drain:
+; Atomically drains the terminal input ring and dispatches each byte.
 	ld hl,0883eh		;4f9e
 	di			;4fa1
 	ld a,(hl)			;4fa2
@@ -17358,7 +16977,7 @@ sub_4f9eh:
 l4fb5h:
 	call sub_5016h		;4fb5
 	ei			;4fb8
-	jp sub_4f9eh		;4fb9
+	jp serial_input_queue_drain		;4fb9
 l4fbch:
 	ld (hl),000h		;4fbc
 	ld hl,(08ff6h)		;4fbe
@@ -17369,7 +16988,7 @@ l4fc8h:
 	ld a,(0800fh)		;4fc8
 	and 0e0h		;4fcb
 	jr z,l5015h		;4fcd
-	call block_0169_end		;4fcf
+	call block_0143_end		;4fcf
 	ld hl,0800fh		;4fd2
 	bit 6,(hl)		;4fd5
 	jr z,l4ff8h		;4fd7
@@ -17380,11 +16999,11 @@ l4fc8h:
 	ld a,003h		;4fe2
 	ld (08022h),a		;4fe4
 	ld hl,083d8h		;4fe7
-	call block_0161_end		;4fea
+	call block_0135_end		;4fea
 	call sub_5424h		;4fed
 	jr nz,l4ff8h		;4ff0
 	ld hl,083d6h		;4ff2
-	call block_0161_end		;4ff5
+	call block_0135_end		;4ff5
 l4ff8h:
 	ld hl,0800fh		;4ff8
 	bit 5,(hl)		;4ffb
@@ -17395,7 +17014,7 @@ l4ff8h:
 	ld a,(080b4h)		;5004
 	and 004h		;5007
 	jr z,l5015h		;5009
-	call sub_1022h		;500b
+	call block_0035_end		;500b
 	push iy		;500e
 	call sub_1042h		;5010
 	pop iy		;5013
@@ -17412,7 +17031,7 @@ sub_5016h:
 	ld hl,080d6h		;5026
 	bit 0,(hl)		;5029
 	jp z,l5092h		;502b
-	call block_0165_end		;502e
+	call block_0139_end		;502e
 	ld hl,0800eh		;5031
 	cp 0c0h		;5034
 	jr nz,l5060h		;5036
@@ -17461,10 +17080,10 @@ l5084h:
 	ld hl,083dfh		;5086
 	ld a,e			;5089
 	cp 0ffh		;508a
-	call z,block_0161_end		;508c
+	call z,block_0135_end		;508c
 	jp l50d1h		;508f
 l5092h:
-	call block_0165_end		;5092
+	call block_0139_end		;5092
 	ld hl,0800eh		;5095
 	bit 1,(hl)		;5098
 	jr nz,l50b9h		;509a
@@ -17509,7 +17128,7 @@ l50d9h:
 	ei			;50dc
 l50ddh:
 	ld hl,08fcch		;50dd
-	call sub_179ch		;50e0
+	call queue_ensure_block		;50e0
 	ei			;50e3
 	call sub_5160h		;50e4
 	ei			;50e7
@@ -17530,10 +17149,10 @@ l50efh:
 	ld hl,080adh		;5100
 	bit 1,(hl)		;5103
 	jr z,l510bh		;5105
-	call block_0173_end		;5107
+	call update_modem_timing_or_carrier_latch		;5107
 	ret c			;510a
 l510bh:
-	call block_0165_end		;510b
+	call block_0139_end		;510b
 	jp c,l5149h		;510e
 	ret			;5111
 l5112h:
@@ -17552,7 +17171,7 @@ l5122h:
 	bit 6,(hl)		;5127
 	res 6,(hl)		;5129
 	jr nz,l5144h		;512b
-	call block_0173_end		;512d
+	call update_modem_timing_or_carrier_latch		;512d
 	ret c			;5130
 	ld hl,(08097h)		;5131
 	cp l			;5134
@@ -17561,11 +17180,11 @@ l5122h:
 	set 6,(hl)		;513b
 	jp l5144h		;513d
 l5140h:
-	call block_0165_end		;5140
+	call block_0139_end		;5140
 	ret nc			;5143
 l5144h:
 	push af			;5144
-	call block_0163_end		;5145
+	call block_0137_end		;5145
 	pop af			;5148
 l5149h:
 	ld hl,08824h		;5149
@@ -17587,7 +17206,7 @@ sub_5163h:
 	add hl,de			;5169
 	jr nc,l517dh		;516a
 	ld de,(08fceh)		;516c
-	call sub_180ch		;5170
+	call queue_put_byte		;5170
 	ld hl,(088a9h)		;5173
 	inc hl			;5176
 	ld (088a9h),hl		;5177
@@ -17598,18 +17217,18 @@ l517dh:
 	set 5,(hl)		;5180
 l5182h:
 	ld a,(088aah)		;5182
-	jp l5837h		;5185
+	jp scc_a_deassert_rts_ptt_if_idle		;5185
 sub_5188h:
 	ld a,(088fah)		;5188
 l518bh:
 	ld de,(08fd2h)		;518b
-	call sub_180ch		;518f
+	call queue_put_byte		;518f
 	ld hl,(088a7h)		;5192
 	inc hl			;5195
 	ld (088a7h),hl		;5196
 	ei			;5199
 	ld a,h			;519a
-	jp l5837h		;519b
+	jp scc_a_deassert_rts_ptt_if_idle		;519b
 sub_519eh:
 	ld hl,08012h		;519e
 	bit 4,(hl)		;51a1
@@ -17668,15 +17287,15 @@ sub_51e2h:
 	jr nz,l51f4h		;51f0
 	ld e,00ah		;51f2
 l51f4h:
-	ld hl,block_0164_end		;51f4
+	ld hl,block_0138_end		;51f4
 	ld d,000h		;51f7
 	add hl,de			;51f9
 	ld b,(hl)			;51fa
 	ret			;51fb
-block_0164_end:
+block_0138_end:
 
-; BLOCK 'block_0165' (start 0x51fc end 0x520f)
-block_0165_start:
+; BLOCK 'block_0139' (start 0x51fc end 0x520f)
+block_0139_start:
 	defb 032h		;51fc
 	defb 032h		;51fd
 	defb 029h		;51fe
@@ -17696,10 +17315,10 @@ block_0165_start:
 	defb 032h		;520c
 	defb 031h		;520d
 	defb 032h		;520e
-block_0165_end:
+block_0139_end:
 
-; BLOCK 'block_0166' (start 0x520f end 0x52b4)
-block_0166_start:
+; BLOCK 'block_0140' (start 0x520f end 0x52b4)
+block_0140_start:
 	or a			;520f
 	jr z,l5218h		;5210
 	ld hl,(08095h)		;5212
@@ -17717,7 +17336,7 @@ l5218h:
 l5226h:
 	rst 10h			;5226
 	jr nz,l5235h		;5227
-	call sub_1416h		;5229
+	call test_input_or_echo_path		;5229
 	jr z,l5235h		;522c
 	call sub_526bh		;522e
 	ld a,(08095h)		;5231
@@ -17740,7 +17359,7 @@ l524bh:
 	inc (hl)			;524b
 	ld hl,083dbh		;524c
 l524fh:
-	call block_0161_end		;524f
+	call block_0135_end		;524f
 	ld a,(08095h)		;5252
 	and a			;5255
 	ret			;5256
@@ -17766,11 +17385,11 @@ sub_526bh:
 	di			;5276
 	call nz,sub_2a58h		;5277
 	ei			;527a
-	call sub_0a62h		;527b
+	call update_battery_settings_checksum		;527b
 	push iy		;527e
 	call sub_1042h		;5280
 	pop iy		;5283
-	call sub_1022h		;5285
+	call block_0035_end		;5285
 	xor a			;5288
 	ld (08021h),a		;5289
 	ret			;528c
@@ -17788,15 +17407,15 @@ l529ah:
 	dec (hl)			;529d
 	ld a,(08095h)		;529e
 	ld de,(08fceh)		;52a1
-	call sub_180ch		;52a5
+	call queue_put_byte		;52a5
 	ld de,(088a9h)		;52a8
 	inc de			;52ac
 	ld (088a9h),de		;52ad
 	jp l529ah		;52b1
-block_0166_end:
+block_0140_end:
 
-; BLOCK 'block_0167' (start 0x52b4 end 0x530a)
-block_0167_start:
+; BLOCK 'block_0141' (start 0x52b4 end 0x530a)
+block_0141_start:
 	defb 02ah		;52b4
 	defb 0f8h		;52b5
 	defb 088h		;52b6
@@ -17883,10 +17502,10 @@ block_0167_start:
 	defb 080h		;5307
 	defb 034h		;5308
 	defb 0c9h		;5309
-block_0167_end:
+block_0141_end:
 
-; BLOCK 'block_0168' (start 0x530a end 0x5354)
-block_0168_start:
+; BLOCK 'block_0142' (start 0x530a end 0x5354)
+block_0142_start:
 	ld hl,08027h		;530a
 	ld a,(hl)			;530d
 	or a			;530e
@@ -17934,10 +17553,10 @@ l534fh:
 	djnz l5347h		;5350
 	ei			;5352
 	ret			;5353
-block_0168_end:
+block_0142_end:
 
-; BLOCK 'block_0169' (start 0x5354 end 0x53be)
-block_0169_start:
+; BLOCK 'block_0143' (start 0x5354 end 0x53be)
+block_0143_start:
 	defb 008h		;5354
 	defb 0d9h		;5355
 	defb 0dbh		;5356
@@ -18044,10 +17663,10 @@ block_0169_start:
 	defb 0fbh		;53bb
 	defb 0edh		;53bc
 	defb 04dh		;53bd
-block_0169_end:
+block_0143_end:
 
-; BLOCK 'block_0170' (start 0x53be end 0x542e)
-block_0170_start:
+; BLOCK 'block_0144' (start 0x53be end 0x542e)
+block_0144_start:
 	ld hl,0800fh		;53be
 	bit 7,(hl)		;53c1
 	ret z			;53c3
@@ -18060,10 +17679,10 @@ block_0170_start:
 	ret nz			;53d1
 l53d2h:
 	ld hl,083dch		;53d2
-	call block_0161_end		;53d5
+	call block_0135_end		;53d5
 	call sub_5424h		;53d8
 	ld hl,083d6h		;53db
-	jp z,block_0161_end		;53de
+	jp z,block_0135_end		;53de
 	rst 18h			;53e1
 	jp nz,l540ah		;53e2
 	ld a,(080aeh)		;53e5
@@ -18076,7 +17695,7 @@ l53d2h:
 	ld (083d7h),a		;53f5
 	ret			;53f8
 sub_53f9h:
-	call block_0169_end		;53f9
+	call block_0143_end		;53f9
 	call sub_5424h		;53fc
 	jr z,l541dh		;53ff
 	ld a,(083d7h)		;5401
@@ -18093,7 +17712,7 @@ l540ah:
 	ld a,(080dbh)		;5413
 	cp b			;5416
 	ret nc			;5417
-	call block_0161_end		;5418
+	call block_0135_end		;5418
 	scf			;541b
 	ret			;541c
 l541dh:
@@ -18110,10 +17729,10 @@ sub_5424h:
 	bit 6,(hl)		;542a
 	pop hl			;542c
 	ret			;542d
-block_0170_end:
+block_0144_end:
 
-; BLOCK 'block_0171' (start 0x542e end 0x56ab)
-block_0171_start:
+; BLOCK 'block_0145' (start 0x542e end 0x56ab)
+block_0145_start:
 	defb 008h		;542e
 	defb 0d9h		;542f
 	defb 03ah		;5430
@@ -18751,10 +18370,10 @@ block_0171_start:
 	defb 0f1h		;56a8
 	defb 0a7h		;56a9
 	defb 0c9h		;56aa
-block_0171_end:
+block_0145_end:
 
-; BLOCK 'block_0172' (start 0x56ab end 0x56d4)
-block_0172_start:
+; BLOCK 'block_0146' (start 0x56ab end 0x6021)
+block_0146_start:
 	ld hl,080d6h		;56ab
 	bit 0,(hl)		;56ae
 	ld hl,0800eh		;56b0
@@ -18781,102 +18400,60 @@ l56cbh:
 	ret z			;56cf
 	res 7,(hl)		;56d0
 	jr l56c3h		;56d2
-block_0172_end:
-
-; BLOCK 'block_0173' (start 0x56d4 end 0x572c)
-block_0173_start:
-	defb 008h		;56d4
-	defb 0d9h		;56d5
-	defb 021h		;56d6
-	defb 00ch		;56d7
-	defb 080h		;56d8
-	defb 0cbh		;56d9
-	defb 0ceh		;56da
-	defb 0dbh		;56db
-	defb 0f1h		;56dc
-	defb 021h		;56dd
-	defb 0b0h		;56de
-	defb 088h		;56df
-	defb 0cbh		;56e0
-	defb 07eh		;56e1
-	defb 020h		;56e2
-	defb 017h		;56e3
-	defb 0edh		;56e4
-	defb 05bh		;56e5
-	defb 0f4h		;56e6
-	defb 08fh		;56e7
-	defb 012h		;56e8
-	defb 01ch		;56e9
-	defb 02ah		;56ea
-	defb 0f6h		;56eb
-	defb 08fh		;56ec
-	defb 0a7h		;56ed
-	defb 0edh		;56ee
-	defb 052h		;56ef
-	defb 028h		;56f0
-	defb 012h		;56f1
-	defb 0edh		;56f2
-	defb 053h		;56f3
-	defb 0f4h		;56f4
-	defb 08fh		;56f5
-	defb 07dh		;56f6
-	defb 0feh		;56f7
-	defb 040h		;56f8
-	defb 038h		;56f9
-	defb 00fh		;56fa
-	defb 03eh		;56fb
-	defb 038h		;56fc
-	defb 0d3h		;56fd
-	defb 0f0h		;56fe
-	defb 0d9h		;56ff
-	defb 008h		;5700
-	defb 0fbh		;5701
-	defb 0edh		;5702
-	defb 04dh		;5703
-	defb 032h		;5704
-	defb 03eh		;5705
-	defb 088h		;5706
-	defb 0c3h		;5707
-	defb 0fbh		;5708
-	defb 056h		;5709
-	defb 021h		;570a
-	defb 013h		;570b
-	defb 080h		;570c
-	defb 0cbh		;570d
-	defb 05eh		;570e
-	defb 0cch		;570f
-	defb 04bh		;5710
-	defb 058h		;5711
-	defb 0c3h		;5712
-	defb 0fbh		;5713
-	defb 056h		;5714
-	defb 008h		;5715
-	defb 0dbh		;5716
-	defb 0f1h		;5717
-	defb 03eh		;5718
-	defb 030h		;5719
-	defb 0d3h		;571a
-	defb 0f0h		;571b
-	defb 03ah		;571c
-	defb 00dh		;571d
-	defb 080h		;571e
-	defb 0f6h		;571f
-	defb 020h		;5720
-	defb 032h		;5721
-	defb 00dh		;5722
-	defb 080h		;5723
-	defb 03eh		;5724
-	defb 038h		;5725
-	defb 0d3h		;5726
-	defb 0f0h		;5727
-	defb 008h		;5728
-	defb 0fbh		;5729
-	defb 0edh		;572a
-	defb 04dh		;572b
-block_0173_end:
-
-; BLOCK 'block_0174' (start 0x572c end 0x5ba6)
-block_0174_start:
+; Channel A receive-character ISR; queues F1 data and acknowledges the SCC.
+scc_a_rx_char_isr:
+	ex af,af'			;56d4
+	exx			;56d5
+	ld hl,0800ch		;56d6
+	set 1,(hl)		;56d9
+	in a,(SCC_A_DATA)		;56db
+	ld hl,088b0h		;56dd
+	bit 7,(hl)		;56e0
+	jr nz,l56fbh		;56e2
+	ld de,(08ff4h)		;56e4
+	ld (de),a			;56e8
+	inc e			;56e9
+	ld hl,(08ff6h)		;56ea
+	and a			;56ed
+	sbc hl,de		;56ee
+	jr z,scc_a_rx_overflow_path		;56f0
+	ld (08ff4h),de		;56f2
+	ld a,l			;56f6
+	cp 040h		;56f7
+	jr c,scc_a_tx_state_isr		;56f9
+l56fbh:
+	ld a,038h		;56fb
+	out (SCC_A_CTRL),a		;56fd
+	exx			;56ff
+	ex af,af'			;5700
+	ei			;5701
+	reti		;5702
+scc_a_rx_overflow_path:
+; Channel A ISR overflow path; stores the byte and joins the common epilogue.
+	ld (0883eh),a		;5704
+	jp l56fbh		;5707
+scc_a_tx_state_isr:
+; Tentative channel A transmit-underrun or transmit-state ISR.
+	ld hl,08013h		;570a
+	bit 3,(hl)		;570d
+	call z,sub_584bh		;570f
+	jp l56fbh		;5712
+; Channel A special receive-condition ISR; drains data and resets errors.
+scc_a_special_rx_condition_isr:
+	ex af,af'			;5715
+	in a,(SCC_A_DATA)		;5716
+	ld a,030h		;5718
+	out (SCC_A_CTRL),a		;571a
+	ld a,(0800dh)		;571c
+	or 020h		;571f
+	ld (0800dh),a		;5721
+	ld a,038h		;5724
+	out (SCC_A_CTRL),a		;5726
+	ex af,af'			;5728
+	ei			;5729
+	reti		;572a
+update_modem_timing_or_carrier_latch:
+; Tentative modem timing/carrier latch update from A.
 	ld b,a			;572c
 	ld de,(0809ah)		;572d
 	ld a,d			;5731
@@ -18903,7 +18480,8 @@ l574ah:
 	set 5,(hl)		;574a
 	scf			;574c
 	ret			;574d
-sub_574eh:
+service_scc_a_tx_pending:
+; Services pending modem transmit bytes and writes SCC A data.
 	ld hl,08012h		;574e
 	bit 3,(hl)		;5751
 	ret z			;5753
@@ -18935,18 +18513,18 @@ l5776h:
 	jr l57b2h		;577f
 l5781h:
 	ld hl,08fd4h		;5781
-	call sub_18a7h		;5784
+	call list_contains_equivalent_block		;5784
 	jr z,l578eh		;5787
-	call 0183bh		;5789
+	call queue_get_byte_hl		;5789
 	jr l57b2h		;578c
 l578eh:
 	ld hl,08fd8h		;578e
-	call sub_18a7h		;5791
+	call list_contains_equivalent_block		;5791
 	ei			;5794
 	ret z			;5795
-	call sub_57dch		;5796
+	call scc_a_tx_blocked_or_not_ready		;5796
 	ret nz			;5799
-	call 0183bh		;579a
+	call queue_get_byte_hl		;579a
 	ei			;579d
 	ld hl,0800bh		;579e
 	bit 7,(hl)		;57a1
@@ -18955,17 +18533,18 @@ l578eh:
 	set 3,(hl)		;57a8
 	rst 10h			;57aa
 	jr z,l57b2h		;57ab
-	call block_0171_end		;57ad
+	call block_0145_end		;57ad
 	jr l57b6h		;57b0
 l57b2h:
 	ei			;57b2
-	call sub_57beh		;57b3
+	call apply_modem_cr_lf_delay		;57b3
 l57b6h:
 	ld hl,08012h		;57b6
 	set 5,(hl)		;57b9
 	out (SCC_A_DATA),a		;57bb
 	ret			;57bd
-sub_57beh:
+apply_modem_cr_lf_delay:
+; Loads configured pacing delay after transmitted CR/LF.
 	cp 00dh		;57be
 	jr z,l57cdh		;57c0
 	cp 00ah		;57c2
@@ -18984,7 +18563,8 @@ l57d3h:
 	ld (0883dh),a		;57d7
 	ld a,l			;57da
 	ret			;57db
-sub_57dch:
+scc_a_tx_blocked_or_not_ready:
+; Combines mode and SCC A status into a transmit-blocked result.
 	ld a,(080d5h)		;57dc
 	and 001h		;57df
 	jr z,l5802h		;57e1
@@ -19002,13 +18582,14 @@ l57f3h:
 	cpl			;57f8
 	and 080h		;57f9
 	ret nz			;57fb
-sub_57fch:
+scc_a_cts_asserted_test:
+; Tests the active-low SCC A RR0 CTS bit.
 	in a,(SCC_A_CTRL)		;57fc
 	cpl			;57fe
 	and 020h		;57ff
 	ret			;5801
 l5802h:
-	call sub_5831h		;5802
+	call modem_tx_busy_test		;5802
 	ret nz			;5805
 	in a,(SCC_A_CTRL)		;5806
 	and 001h		;5808
@@ -19020,9 +18601,9 @@ l5802h:
 	and 040h		;5815
 	ret nz			;5817
 l5818h:
-	call sub_58c6h		;5818
+	call modem_tx_mode_eligible		;5818
 	jr nz,l5821h		;581b
-	call sub_57fch		;581d
+	call scc_a_cts_asserted_test		;581d
 	ret nz			;5820
 l5821h:
 	ld a,(08013h)		;5821
@@ -19032,24 +18613,26 @@ l5827h:
 	ld a,(0800eh)		;5827
 	or 080h		;582a
 	ld (0800eh),a		;582c
-	jr sub_57fch		;582f
-sub_5831h:
+	jr scc_a_cts_asserted_test		;582f
+modem_tx_busy_test:
+; Returns packet transmit-active state from SRAM 0x8013 bit 0.
 	ld a,(08013h)		;5831
 	and 001h		;5834
 	ret			;5836
-l5837h:
+scc_a_deassert_rts_ptt_if_idle:
+; Clears SCC-A WR5 RTS/PTT when transmission is idle.
 	ld hl,08013h		;5837
 	bit 3,(hl)		;583a
 	ret nz			;583c
 	bit 7,(hl)		;583d
-	jr nz,l584bh		;583f
+	jr nz,sub_584bh		;583f
 	ld hl,(088cfh)		;5841
 	ld de,0ffa0h		;5844
 	add hl,de			;5847
 	ret c			;5848
 	or a			;5849
 	ret z			;584a
-l584bh:
+sub_584bh:
 	di			;584b
 	ld a,005h		;584c
 	out (SCC_A_CTRL),a		;584e
@@ -19060,27 +18643,29 @@ l584bh:
 	out (SCC_A_CTRL),a		;5857
 	ld hl,08013h		;5859
 	set 3,(hl)		;585c
-	call sub_58c6h		;585e
+	call modem_tx_mode_eligible		;585e
 	ret z			;5861
 	set 4,(hl)		;5862
 	ld hl,08012h		;5864
 	set 3,(hl)		;5867
 	ret			;5869
-sub_586ah:
+modem_channel_slot_test:
+; Tentative link-channel slot comparison used by PTT policy.
 	ld a,(080b5h)		;586a
 	cpl			;586d
 	and 040h		;586e
 	ret nz			;5870
 	ld a,(0889dh)		;5871
-	call sub_112bh		;5874
+	call select_channel_context		;5874
 	ld a,(iy+040h)		;5877
 	dec a			;587a
 	and 007h		;587b
 	ld l,(iy+058h)		;587d
 	cp l			;5880
 	ret			;5881
-sub_5882h:
-	call sub_586ah		;5882
+update_scc_a_rts_ptt:
+; Updates SCC-A WR5 RTS/PTT according to modem transmit state.
+	call modem_channel_slot_test		;5882
 	ld hl,08013h		;5885
 	jr nz,l588dh		;5888
 	set 7,(hl)		;588a
@@ -19107,7 +18692,7 @@ l588dh:
 	ld (hl),a			;58af
 	ei			;58b0
 	out (SCC_A_CTRL),a		;58b1
-	call sub_58c6h		;58b3
+	call modem_tx_mode_eligible		;58b3
 	di			;58b6
 	ld hl,08013h		;58b7
 	res 3,(hl)		;58ba
@@ -19119,7 +18704,8 @@ l58c2h:
 	set 4,(hl)		;58c2
 	ei			;58c4
 	ret			;58c5
-sub_58c6h:
+modem_tx_mode_eligible:
+; Tests global mode, link state, and configuration for modem transmission.
 	ld a,(080d5h)		;58c6
 	cpl			;58c9
 	and 001h		;58ca
@@ -19142,7 +18728,7 @@ sub_58e1h:
 	di			;58ea
 	call block_0021_end		;58eb
 	ei			;58ee
-	call sub_0a62h		;58ef
+	call update_battery_settings_checksum		;58ef
 l58f2h:
 	ld hl,(088a3h)		;58f2
 	ld a,h			;58f5
@@ -19155,7 +18741,7 @@ l58f2h:
 	rst 28h			;5902
 	jr nz,l590bh		;5903
 	call sub_693bh		;5905
-	call z,sub_0800h		;5908
+	call z,report_battery_ram_checksum_failure		;5908
 l590bh:
 	call sub_19f5h		;590b
 l590eh:
@@ -19168,38 +18754,38 @@ l590eh:
 	ld a,000h		;591a
 	ld (hl),a			;591c
 l591dh:
-	call sub_112bh		;591d
-	call sub_4f9eh		;5920
+	call select_channel_context		;591d
+	call serial_input_queue_drain		;5920
 	call sub_07f9h		;5923
-	call block_0207_end		;5926
-	call sub_4f9eh		;5929
-	call sub_674bh		;592c
-	call sub_4f9eh		;592f
+	call block_0167_end		;5926
+	call serial_input_queue_drain		;5929
+	call ax25_link_timeout_service		;592c
+	call serial_input_queue_drain		;592f
 	call sub_597eh		;5932
-	call sub_4f9eh		;5935
-	call sub_0a73h		;5938
-	call sub_4f9eh		;593b
+	call serial_input_queue_drain		;5935
+	call service_transmit_and_retry_state		;5938
+	call serial_input_queue_drain		;593b
 	call sub_5be8h		;593e
-	call sub_4f9eh		;5941
+	call serial_input_queue_drain		;5941
 	ld a,(088a1h)		;5944
-	call sub_112bh		;5947
+	call select_channel_context		;5947
 	call sub_73a5h		;594a
 	call sub_65b3h		;594d
-	call sub_4f9eh		;5950
-	call sub_3da7h		;5953
-	call sub_4f9eh		;5956
-	call sub_4f83h		;5959
-	call sub_7c1bh		;595c
-	call sub_4f9eh		;595f
+	call serial_input_queue_drain		;5950
+	call mailbox_poll_session		;5953
+	call serial_input_queue_drain		;5956
+	call serial_service_dispatch		;5959
+	call service_terminal_tx_timing		;595c
+	call serial_input_queue_drain		;595f
 	call block_0037_end		;5962
-	call sub_4f9eh		;5965
+	call serial_input_queue_drain		;5965
 	call sub_7c02h		;5968
 	ret			;596b
 sub_596ch:
 	ld a,(083eah)		;596c
 	or a			;596f
 	ret nz			;5970
-	call sub_13b2h		;5971
+	call terminal_rts_deassert		;5971
 	ei			;5974
 	ld hl,08022h		;5975
 	ld a,(hl)			;5978
@@ -19216,14 +18802,14 @@ sub_597eh:
 	ret			;5986
 l5987h:
 	ld hl,08fcch		;5987
-	call sub_18a7h		;598a
+	call list_contains_equivalent_block		;598a
 	jr nz,l5997h		;598d
 	ld hl,block_0000_start		;598f
 	ld (088a9h),hl		;5992
 	ei			;5995
 	ret			;5996
 l5997h:
-	call 0183bh		;5997
+	call queue_get_byte_hl		;5997
 	ld hl,(088a9h)		;599a
 	dec hl			;599d
 	ld (088a9h),hl		;599e
@@ -19233,7 +18819,7 @@ l5997h:
 	bit 7,(hl)		;59a6
 	res 7,(hl)		;59a8
 	jr z,l59b2h		;59aa
-	call sub_0f4eh		;59ac
+	call map_flow_control_character		;59ac
 	jp z,l5a5bh		;59af
 l59b2h:
 	push af			;59b2
@@ -19270,12 +18856,12 @@ l59e3h:
 	ld (0889dh),a		;59e4
 	set 3,(hl)		;59e7
 	ld hl,08fe0h		;59e9
-	call sub_179ch		;59ec
+	call queue_ensure_block		;59ec
 	ei			;59ef
 	ld hl,0801dh		;59f0
 	res 7,(hl)		;59f3
 	ld hl,0fffeh		;59f5
-	call sub_78d2h		;59f8
+	call terminal_feature_mode_test		;59f8
 	jr nz,l59feh		;59fb
 	dec hl			;59fd
 l59feh:
@@ -19310,7 +18896,7 @@ l5a1fh:
 	ld a,(08840h)		;5a2b
 	cp 0ffh		;5a2e
 	jr z,l5a4dh		;5a30
-	call sub_78d2h		;5a32
+	call terminal_feature_mode_test		;5a32
 	jr nz,l5a3dh		;5a35
 	ld a,(088aeh)		;5a37
 	or a			;5a3a
@@ -19338,7 +18924,7 @@ l5a5bh:
 	bit 3,(hl)		;5a5e
 	jr z,l5a84h		;5a60
 	ld de,(08fe2h)		;5a62
-	call sub_17feh		;5a66
+	call queue_increment_counter_and_put		;5a66
 	ei			;5a69
 	ld hl,088aeh		;5a6a
 	xor (hl)			;5a6d
@@ -19379,7 +18965,7 @@ sub_5a87h:
 l5aadh:
 	ld b,a			;5aad
 l5aaeh:
-	call sub_6ab1h		;5aae
+	call ax25_callsign_compare		;5aae
 	jr z,l5ac6h		;5ab1
 	push bc			;5ab3
 	ld bc,l000dh		;5ab4
@@ -19442,7 +19028,7 @@ l5b08h:
 	ret			;5b0b
 l5b0ch:
 	ld a,(hl)			;5b0c
-	call sub_7bb9h		;5b0d
+	call frame_buffer_append_byte		;5b0d
 	push hl			;5b10
 	ld hl,(088cfh)		;5b11
 	ld de,0fff6h		;5b14
@@ -19473,23 +19059,23 @@ sub_5b1eh:
 	add hl,de			;5b40
 	ld (0883fh),hl		;5b41
 	ex de,hl			;5b44
-	call sub_17ech		;5b45
+	call queue_insert_with_word		;5b45
 	ei			;5b48
 	ld a,(08017h)		;5b49
 	and 040h		;5b4c
 	jp nz,l5b8fh		;5b4e
 	ld hl,08ff0h		;5b51
-	call sub_18a7h		;5b54
+	call list_contains_equivalent_block		;5b54
 	ei			;5b57
 	jr z,l5b77h		;5b58
 	ld bc,block_0000_start		;5b5a
 l5b5dh:
 	ld hl,08ff0h		;5b5d
-	call sub_18a7h		;5b60
+	call list_contains_equivalent_block		;5b60
 	ei			;5b63
 	jr z,l5b74h		;5b64
 	inc bc			;5b66
-	call 0183bh		;5b67
+	call queue_get_byte_hl		;5b67
 	ei			;5b6a
 	call sub_5bddh		;5b6b
 	ld a,(08088h)		;5b6e
@@ -19506,7 +19092,7 @@ l5b7ah:
 	sbc hl,de		;5b82
 	jr z,l5ba9h		;5b84
 	inc bc			;5b86
-	call sub_0f38h		;5b87
+	call command_buffer_get		;5b87
 	call sub_5bddh		;5b8a
 	jr l5b7ah		;5b8d
 l5b8fh:
@@ -19515,7 +19101,7 @@ l5b8fh:
 l5b95h:
 	ld e,(hl)			;5b95
 	res 7,e		;5b96
-	call sub_7befh		;5b98
+	call return_zero		;5b98
 	xor e			;5b9b
 	push hl			;5b9c
 	call sub_5bddh		;5b9d
@@ -19523,22 +19109,12 @@ l5b95h:
 	bit 7,(hl)		;5ba1
 	inc hl			;5ba3
 	jr z,l5b95h		;5ba4
-block_0174_end:
-
-; BLOCK 'block_0175' (start 0x5ba6 end 0x5bab)
-block_0175_start:
-; high-bit-terminated text, ends at 0x5baa: \tDMx1
-str_5ba6_tdmx1:
-	defb 009h		;5ba6
-	defb 044h		;5ba7
-	defb 04dh		;5ba8
+	add hl,bc			;5ba6
+	ld b,h			;5ba7
+	ld c,l			;5ba8
 l5ba9h:
-	defb 078h		;5ba9
-	defb 0b1h		;5baa
-block_0175_end:
-
-; BLOCK 'block_0176' (start 0x5bab end 0x5d7d)
-block_0176_start:
+	ld a,b			;5ba9
+	or c			;5baa
 	jr nz,l5bb9h		;5bab
 	ld hl,(0883fh)		;5bad
 	ld e,(hl)			;5bb0
@@ -19556,7 +19132,7 @@ l5bb9h:
 	ret			;5bc2
 l5bc3h:
 	ld hl,08ff0h		;5bc3
-	call sub_18a7h		;5bc6
+	call list_contains_equivalent_block		;5bc6
 	ei			;5bc9
 	ret nz			;5bca
 	ld a,(08017h)		;5bcb
@@ -19572,7 +19148,7 @@ sub_5bddh:
 	ld e,(hl)			;5be0
 	inc hl			;5be1
 	ld d,(hl)			;5be2
-	call sub_17feh		;5be3
+	call queue_increment_counter_and_put		;5be3
 l5be6h:
 	ei			;5be6
 	ret			;5be7
@@ -19582,7 +19158,7 @@ sub_5be8h:
 l5beeh:
 	call sub_6fa0h		;5bee
 	ld hl,08fdch		;5bf1
-	call sub_18ddh		;5bf4
+	call list_is_empty		;5bf4
 	jr z,l5be6h		;5bf7
 	ld hl,l000eh		;5bf9
 	add hl,de			;5bfc
@@ -19611,7 +19187,7 @@ l5c25h:
 	ld a,(0804dh)		;5c2b
 	or a			;5c2e
 	ld hl,083f8h		;5c2f
-	call z,block_0161_end		;5c32
+	call z,block_0135_end		;5c32
 	jr l5c3ch		;5c35
 l5c37h:
 	ld a,h			;5c37
@@ -19646,7 +19222,7 @@ l5c59h:
 	ld h,b			;5c64
 	ld l,c			;5c65
 	ld (08895h),hl		;5c66
-	call sub_1a13h		;5c69
+	call initialize_record_cursor		;5c69
 	rst 18h			;5c6c
 	jp nz,l5d11h		;5c6d
 	ld hl,08847h		;5c70
@@ -19683,9 +19259,9 @@ l5c78h:
 	xor a			;5ca8
 	ld (0889bh),a		;5ca9
 	ld de,(08891h)		;5cac
-	call sub_187dh		;5cb0
+	call queue_get_byte		;5cb0
 	ld (0888dh),a		;5cb3
-	call sub_187dh		;5cb6
+	call queue_get_byte		;5cb6
 	ld (0888eh),a		;5cb9
 	ld hl,(08895h)		;5cbc
 	ld de,0fffah		;5cbf
@@ -19696,7 +19272,7 @@ l5cc5h:
 	bit 2,a		;5cc8
 	jr z,l5cdbh		;5cca
 l5ccch:
-	call sub_187dh		;5ccc
+	call queue_get_byte		;5ccc
 	ei			;5ccf
 	ld (hl),a			;5cd0
 	inc hl			;5cd1
@@ -19718,9 +19294,9 @@ l5ce2h:
 	sub c			;5cee
 	ld (0889bh),a		;5cef
 	ld de,(08891h)		;5cf2
-	call sub_187dh		;5cf6
+	call queue_get_byte		;5cf6
 	ld (0888dh),a		;5cf9
-	call sub_187dh		;5cfc
+	call queue_get_byte		;5cfc
 	ld (0888eh),a		;5cff
 	ld hl,(08895h)		;5d02
 	ld a,00bh		;5d05
@@ -19764,7 +19340,7 @@ l5d11h:
 	ld hl,08855h		;5d50
 l5d53h:
 	ld de,(08891h)		;5d53
-	call sub_187dh		;5d57
+	call queue_get_byte		;5d57
 	add a,a			;5d5a
 	ld (hl),a			;5d5b
 	inc hl			;5d5c
@@ -19774,7 +19350,7 @@ l5d5fh:
 	ret			;5d60
 sub_5d61h:
 	ld a,(0889ch)		;5d61
-	call sub_112bh		;5d64
+	call select_channel_context		;5d64
 	call sub_716bh		;5d67
 	ld a,(0888dh)		;5d6a
 	cp 0ffh		;5d6d
@@ -19783,24 +19359,9 @@ sub_5d61h:
 	ld hl,0801dh		;5d75
 	res 5,(hl)		;5d78
 	res 6,(hl)		;5d7a
-	defb 0cdh		;5d7c
-block_0176_end:
-
-; BLOCK 'block_0177' (start 0x5d7d end 0x5d82)
-block_0177_start:
-; high-bit-terminated text, ends at 0x5d81: Qi>?M
-str_5d7d_qi_m:
-	defb 051h		;5d7d
-	defb 069h		;5d7e
-	defb 03eh		;5d7f
-	defb 03fh		;5d80
-	defb 0cdh		;5d81
-block_0177_end:
-
-; BLOCK 'block_0178' (start 0x5d82 end 0x6021)
-block_0178_start:
-	or e			;5d82
-	ld l,e			;5d83
+	call sub_6951h		;5d7c
+	ld a,03fh		;5d7f
+	call ax25_received_frame_dispatch		;5d81
 	ld hl,0801dh		;5d84
 	set 5,(hl)		;5d87
 	call sub_6951h		;5d89
@@ -19910,9 +19471,9 @@ l5e4ah:
 l5e5fh:
 	res 0,(iy+066h)		;5e5f
 l5e63h:
-	call sub_69dch		;5e63
+	call ax25_prepare_address_header		;5e63
 	call sub_68bbh		;5e66
-	call sub_6927h		;5e69
+	call ax25_reset_sequence_state		;5e69
 	pop de			;5e6c
 	jr l5each		;5e6d
 l5e6fh:
@@ -19929,7 +19490,7 @@ l5e6fh:
 l5e82h:
 	cp 009h		;5e82
 	jr nz,l5e95h		;5e84
-	call sub_676bh		;5e86
+	call ax25_disconnect_or_reset_link		;5e86
 	ld hl,0888dh		;5e89
 	ld a,(hl)			;5e8c
 	and 010h		;5e8d
@@ -19946,7 +19507,7 @@ l5e95h:
 	ret z			;5ea3
 	call sub_76d8h		;5ea4
 	ld e,000h		;5ea7
-	jp block_0181_end		;5ea9
+	jp block_0149_end		;5ea9
 l5each:
 	ld a,(0888dh)		;5eac
 	push de			;5eaf
@@ -19957,7 +19518,7 @@ l5each:
 	cp 004h		;5eb8
 	jr c,l5eddh		;5eba
 	ld a,(0888dh)		;5ebc
-	call sub_6410h		;5ebf
+	call ax25_advance_receive_window		;5ebf
 	ld hl,08016h		;5ec2
 	bit 2,(hl)		;5ec5
 	jr z,l5eddh		;5ec7
@@ -19971,11 +19532,11 @@ l5ed9h:
 	res 2,(iy+067h)		;5ed9
 l5eddh:
 	pop de			;5edd
-	call block_0181_end		;5ede
+	call block_0149_end		;5ede
 	ld a,(0888dh)		;5ee1
 	bit 0,a		;5ee4
 	ret nz			;5ee6
-	call block_0185_end		;5ee7
+	call block_0151_end		;5ee7
 	ld e,05ch		;5eea
 	call block_0031_end		;5eec
 	ld a,(08065h)		;5eef
@@ -19986,7 +19547,7 @@ l5ef4h:
 	and 010h		;5ef7
 	jr nz,l5f53h		;5ef9
 	ld a,(0889ch)		;5efb
-	call sub_112bh		;5efe
+	call select_channel_context		;5efe
 	ld hl,0888dh		;5f01
 	ld a,(hl)			;5f04
 	and 0efh		;5f05
@@ -19996,9 +19557,9 @@ l5ef4h:
 	jr c,l5f27h		;5f0e
 	ld de,08854h		;5f10
 	ld hl,l6027h		;5f13
-	call sub_6ab1h		;5f16
+	call ax25_callsign_compare		;5f16
 	jr z,l5f27h		;5f19
-	call block_0179_end		;5f1b
+	call block_0147_end		;5f1b
 	jp z,l5fa0h		;5f1e
 	ld a,(0828ch)		;5f21
 	or a			;5f24
@@ -20010,7 +19571,7 @@ l5f27h:
 	jp l7067h		;5f2e
 l5f31h:
 	ld a,(0889ch)		;5f31
-	call sub_112bh		;5f34
+	call select_channel_context		;5f34
 	ld hl,0888dh		;5f37
 	ld a,(hl)			;5f3a
 	and 010h		;5f3b
@@ -20018,17 +19579,17 @@ l5f31h:
 	ld (hl),a			;5f3f
 l5f40h:
 	set 3,(iy+066h)		;5f40
-	call sub_69dch		;5f44
-	call sub_78d9h		;5f47
-	call block_0199_end		;5f4a
-	call sub_7a63h		;5f4d
-	call sub_7bdch		;5f50
+	call ax25_prepare_address_header		;5f44
+	call ax25_classify_current_control		;5f47
+	call block_0161_end		;5f4a
+	call emit_optional_ax25_address_metadata		;5f4d
+	call mark_frame_buffer_complete		;5f50
 l5f53h:
 	jp l6015h		;5f53
 l5f56h:
 	cp 043h		;5f56
 	jr nz,l5f74h		;5f58
-	call block_0179_end		;5f5a
+	call block_0147_end		;5f5a
 	jr z,l5f65h		;5f5d
 	ld a,(0828ch)		;5f5f
 	or a			;5f62
@@ -20083,7 +19644,7 @@ l5fc0h:
 	ld a,000h		;5fc0
 l5fc2h:
 	push af			;5fc2
-	call sub_112bh		;5fc3
+	call select_channel_context		;5fc3
 	pop bc			;5fc6
 	ld a,(iy+044h)		;5fc7
 	or a			;5fca
@@ -20128,7 +19689,7 @@ l5ffch:
 	jr z,l6012h		;600e
 	set 2,(hl)		;6010
 l6012h:
-	call sub_67e1h		;6012
+	call ax25_enter_connected_state		;6012
 l6015h:
 	ld hl,block_0000_start		;6015
 	ld (08895h),hl		;6018
@@ -20136,10 +19697,10 @@ l6015h:
 sub_601ch:
 	call sub_6b64h		;601c
 	jr l6015h		;601f
-block_0178_end:
+block_0146_end:
 
-; BLOCK 'block_0179' (start 0x6021 end 0x602f)
-block_0179_start:
+; BLOCK 'block_0147' (start 0x6021 end 0x602f)
+block_0147_start:
 	defb 040h		;6021
 	defb 040h		;6022
 	defb 040h		;6023
@@ -20156,14 +19717,14 @@ l6027h:
 	defb 040h		;602d
 l602eh:
 	defb 060h		;602e
-block_0179_end:
+block_0147_end:
 
-; BLOCK 'block_0180' (start 0x602f end 0x6104)
-block_0180_start:
+; BLOCK 'block_0148' (start 0x602f end 0x6104)
+block_0148_start:
 	push hl			;602f
 	ld hl,0828ch		;6030
 	push de			;6033
-	call block_0197_end		;6034
+	call block_0159_end		;6034
 	pop de			;6037
 	ld a,(0828bh)		;6038
 l603bh:
@@ -20176,7 +19737,7 @@ l603eh:
 sub_6041h:
 	push hl			;6041
 	ld hl,082c6h		;6042
-	call block_0197_end		;6045
+	call block_0159_end		;6045
 	ld hl,082c6h		;6048
 	ld de,0884dh		;604b
 	call nc,sub_6f7eh		;604e
@@ -20207,7 +19768,7 @@ sub_6079h:
 	and 040h		;607c
 	ret z			;607e
 	ld a,(08820h)		;607f
-	call sub_112bh		;6082
+	call select_channel_context		;6082
 	ld a,(iy+044h)		;6085
 	or a			;6088
 	ret z			;6089
@@ -20225,15 +19786,15 @@ sub_6091h:
 	ld de,l000eh		;609b
 	add hl,de			;609e
 	ld de,0884eh		;609f
-	call sub_6acch		;60a2
+	call ax25_address_prefix_compare		;60a2
 	ret nz			;60a5
 	ld de,08847h		;60a6
-	jp sub_6acch		;60a9
+	jp ax25_address_prefix_compare		;60a9
 l60ach:
 	ld de,block_0000_end		;60ac
 	add hl,de			;60af
 	ld de,08854h		;60b0
-	jp sub_6ab1h		;60b3
+	jp ax25_callsign_compare		;60b3
 sub_60b6h:
 	ld a,(0888dh)		;60b6
 	ld b,a			;60b9
@@ -20253,7 +19814,7 @@ l60cch:
 l60ceh:
 	and b			;60ce
 	ld c,a			;60cf
-	ld hl,block_0180_end		;60d0
+	ld hl,block_0148_end		;60d0
 l60d3h:
 	ld a,(hl)			;60d3
 	inc hl			;60d4
@@ -20287,10 +19848,10 @@ l60f3h:
 l6102h:
 	inc e			;6102
 	ret			;6103
-block_0180_end:
+block_0148_end:
 
-; BLOCK 'block_0181' (start 0x6104 end 0x6327)
-block_0181_start:
+; BLOCK 'block_0149' (start 0x6104 end 0x6327)
+block_0149_start:
 	defb 001h		;6104
 	defb 002h		;6105
 	defb 005h		;6106
@@ -20847,10 +20408,12 @@ l6317h:
 	defb 081h		;6324
 	defb 000h		;6325
 	defb 000h		;6326
-block_0181_end:
+block_0149_end:
 
-; BLOCK 'block_0182' (start 0x6327 end 0x643e)
-block_0182_start:
+; BLOCK 'block_0150' (start 0x6327 end 0x64c2)
+block_0150_start:
+; Dispatches a decoded AX.25 frame according to control value and link state.
+ax25_dispatch_received_frame:
 	ld a,e			;6327
 	cp 008h		;6328
 	jr c,l633eh		;632a
@@ -20910,7 +20473,7 @@ l6373h:
 	jr z,l63a9h		;637d
 	cp 001h		;637f
 	call z,sub_7030h		;6381
-	call sub_676bh		;6384
+	call ax25_disconnect_or_reset_link		;6384
 	jr l63a9h		;6387
 l6389h:
 	cp 004h		;6389
@@ -20926,10 +20489,10 @@ l639ah:
 	jr z,l63a6h		;639b
 	cp 004h		;639d
 	jr nc,l63a9h		;639f
-	call sub_6927h		;63a1
+	call ax25_reset_sequence_state		;63a1
 	jr l63a9h		;63a4
 l63a6h:
-	call sub_67e1h		;63a6
+	call ax25_enter_connected_state		;63a6
 l63a9h:
 	pop af			;63a9
 	rra			;63aa
@@ -20995,7 +20558,8 @@ l6409h:
 	ld a,(iy+040h)		;6409
 	ld (iy+043h),a		;640c
 	ret			;640f
-sub_6410h:
+ax25_advance_receive_window:
+; Advances modulo-8 receive/window state and releases acknowledged buffers.
 	push af			;6410
 	rlca			;6411
 	rlca			;6412
@@ -21028,23 +20592,13 @@ l6430h:
 	push iy		;643a
 	pop de			;643c
 	add hl,de			;643d
-block_0182_end:
-
-; BLOCK 'block_0183' (start 0x643e end 0x6445)
-block_0183_start:
-; high-bit-terminated text, ends at 0x6444: ^w#Vwz3
-str_643e_w_vwz3:
-	defb 05eh		;643e
-	defb 077h		;643f
-	defb 023h		;6440
-	defb 056h		;6441
-	defb 077h		;6442
-	defb 07ah		;6443
-	defb 0b3h		;6444
-block_0183_end:
-
-; BLOCK 'block_0184' (start 0x6445 end 0x64c2)
-block_0184_start:
+	ld e,(hl)			;643e
+	ld (hl),a			;643f
+	inc hl			;6440
+	ld d,(hl)			;6441
+	ld (hl),a			;6442
+	ld a,d			;6443
+	or e			;6444
 	jr nz,l644eh		;6445
 	pop de			;6447
 	pop bc			;6448
@@ -21107,19 +20661,19 @@ l64a8h:
 	or e			;64ab
 	ld (iy+063h),a		;64ac
 	ld a,002h		;64af
-	jp block_0053_end		;64b1
+	jp block_0051_end		;64b1
 sub_64b4h:
-	ld hl,block_0184_end		;64b4
+	ld hl,block_0150_end		;64b4
 	ld e,(iy+044h)		;64b7
 	ld d,000h		;64ba
 	add hl,de			;64bc
 	ld a,(hl)			;64bd
 	ld (iy+044h),a		;64be
 	ret			;64c1
-block_0184_end:
+block_0150_end:
 
-; BLOCK 'block_0185' (start 0x64c2 end 0x64d2)
-block_0185_start:
+; BLOCK 'block_0151' (start 0x64c2 end 0x64d2)
+block_0151_start:
 	defb 000h		;64c2
 	defb 001h		;64c3
 	defb 002h		;64c4
@@ -21136,10 +20690,10 @@ block_0185_start:
 	defb 00dh		;64cf
 	defb 00eh		;64d0
 	defb 00fh		;64d1
-block_0185_end:
+block_0151_end:
 
-; BLOCK 'block_0186' (start 0x64d2 end 0x64fb)
-block_0186_start:
+; BLOCK 'block_0152' (start 0x64d2 end 0x6a83)
+block_0152_start:
 	bit 2,(iy+056h)		;64d2
 	ret nz			;64d6
 	ld a,(iy+044h)		;64d7
@@ -21157,27 +20711,14 @@ block_0186_start:
 	jp c,l6529h		;64f3
 	ld a,(08008h)		;64f6
 	push af			;64f9
-	defb 0cdh		;64fa
-block_0186_end:
-
-; BLOCK 'block_0187' (start 0x64fb end 0x6500)
-block_0187_start:
-; high-bit-terminated text, ends at 0x64ff: Ue0/q
-str_64fb_ue0_q:
-	defb 055h		;64fb
-	defb 065h		;64fc
-	defb 030h		;64fd
-	defb 02fh		;64fe
-	defb 0f1h		;64ff
-block_0187_end:
-
-; BLOCK 'block_0188' (start 0x6500 end 0x6a83)
-block_0188_start:
+	call sub_6555h		;64fa
+	jr nc,l652eh		;64fd
+	pop af			;64ff
 	ld (08008h),a		;6500
 	ld hl,(08fdah)		;6503
 	call sub_16cah		;6506
 	ld hl,08fd8h		;6509
-	call sub_179ch		;650c
+	call queue_ensure_block		;650c
 	ei			;650f
 	call sub_1586h		;6510
 	jr c,l652fh		;6513
@@ -21194,6 +20735,7 @@ l6524h:
 l6529h:
 	ld e,004h		;6529
 	jp l6488h		;652b
+l652eh:
 	pop af			;652e
 l652fh:
 	ld a,(iy+042h)		;652f
@@ -21213,6 +20755,7 @@ sub_653eh:
 	res 0,(iy+057h)		;654c
 	set 2,(iy+057h)		;6550
 	ret			;6554
+sub_6555h:
 	call sub_1586h		;6555
 	jr nc,l6561h		;6558
 	call sub_6596h		;655a
@@ -21221,7 +20764,7 @@ sub_653eh:
 l6561h:
 	call sub_6e3dh		;6561
 	call sub_66a0h		;6564
-	call sub_003bh		;6567
+	call service_deferred_queue		;6567
 	ld hl,0801bh		;656a
 	bit 6,(hl)		;656d
 	jr z,l6575h		;656f
@@ -21234,19 +20777,19 @@ l6575h:
 	ret c			;6578
 	ld a,(iy+065h)		;6579
 	or 030h		;657c
-	call sub_027dh		;657e
+	call test_nonzero_and_output_status		;657e
 	ret c			;6581
 l6582h:
 	dec bc			;6582
 	bit 7,b		;6583
 	jr nz,l6590h		;6585
 	call sub_66cdh		;6587
-	call sub_1304h		;658a
+	call console_putchar_routed		;658a
 	jr nc,l6582h		;658d
 	ret			;658f
 l6590h:
 	ld a,(088feh)		;6590
-	jp sub_027dh		;6593
+	jp test_nonzero_and_output_status		;6593
 sub_6596h:
 	call sub_66bbh		;6596
 	call sub_6e3dh		;6599
@@ -21256,7 +20799,7 @@ l659eh:
 	cp 00ah		;65a1
 	jr z,l65adh		;65a3
 	ld de,(08feeh)		;65a5
-	call sub_180ch		;65a9
+	call queue_put_byte		;65a9
 	ei			;65ac
 l65adh:
 	dec bc			;65ad
@@ -21268,7 +20811,7 @@ sub_65b3h:
 	and 040h		;65b6
 	ret z			;65b8
 	ld a,(08820h)		;65b9
-	call sub_112bh		;65bc
+	call select_channel_context		;65bc
 	call sub_65feh		;65bf
 	ret z			;65c2
 	call sub_152ch		;65c3
@@ -21277,14 +20820,14 @@ sub_65b3h:
 	and 040h		;65cb
 	jr z,l65dch		;65cd
 	ld de,(08fech)		;65cf
-	call sub_1872h		;65d3
-	call sub_136dh		;65d6
+	call queue_peek_byte		;65d3
+	call ascii_to_uppercase		;65d6
 	cp 041h		;65d9
 	ret nz			;65db
 l65dch:
 	call sub_65feh		;65dc
 	ret z			;65df
-	call 0183bh		;65e0
+	call queue_get_byte_hl		;65e0
 	ei			;65e3
 	ld hl,08afch		;65e4
 	ld bc,(08afah)		;65e7
@@ -21302,7 +20845,7 @@ l65dch:
 	jr l65dch		;65fc
 sub_65feh:
 	ld hl,08fech		;65fe
-	call sub_18a7h		;6601
+	call list_contains_equivalent_block		;6601
 	ei			;6604
 	ret			;6605
 l6606h:
@@ -21311,12 +20854,12 @@ l6606h:
 	bit 3,(hl)		;660a
 	jr nz,l6616h		;660c
 	ld de,(08ffeh)		;660e
-	call sub_17feh		;6612
+	call queue_increment_counter_and_put		;6612
 	ei			;6615
 l6616h:
 	call sub_65feh		;6616
 	ret z			;6619
-	call 0183bh		;661a
+	call queue_get_byte_hl		;661a
 	ei			;661d
 	call sub_663fh		;661e
 	bit 3,(hl)		;6621
@@ -21324,10 +20867,10 @@ l6616h:
 	call sub_65feh		;6625
 	jr z,l6639h		;6628
 	ld de,(08fech)		;662a
-	call sub_1872h		;662e
+	call queue_peek_byte		;662e
 	cp 00dh		;6631
 	jr nz,l6639h		;6633
-	call 0183bh		;6635
+	call queue_get_byte_hl		;6635
 	ei			;6638
 l6639h:
 	ld a,0d3h		;6639
@@ -21351,7 +20894,7 @@ l664fh:
 	ld hl,l72beh		;6659
 	add hl,de			;665c
 	ld d,a			;665d
-	call sub_136dh		;665e
+	call ascii_to_uppercase		;665e
 	cp (hl)			;6661
 	jr z,l666bh		;6662
 	ld e,000h		;6664
@@ -21392,7 +20935,7 @@ l669ah:
 sub_66a0h:
 	ld hl,0800dh		;66a0
 	res 7,(hl)		;66a3
-	call sub_1416h		;66a5
+	call test_input_or_echo_path		;66a5
 	ret z			;66a8
 	rst 10h			;66a9
 	ret nz			;66aa
@@ -21408,7 +20951,7 @@ l66b8h:
 sub_66bbh:
 	ld hl,0800dh		;66bb
 	res 7,(hl)		;66be
-	call sub_1416h		;66c0
+	call test_input_or_echo_path		;66c0
 	ret z			;66c3
 	ld a,(080adh)		;66c4
 	bit 2,a		;66c7
@@ -21416,11 +20959,11 @@ sub_66bbh:
 	set 7,(hl)		;66ca
 	ret			;66cc
 sub_66cdh:
-	call sub_7befh		;66cd
+	call return_zero		;66cd
 	ld l,a			;66d0
 	push de			;66d1
 	ld de,(08891h)		;66d2
-	call sub_187dh		;66d6
+	call queue_get_byte		;66d6
 	pop de			;66d9
 	xor l			;66da
 	ld hl,0800dh		;66db
@@ -21464,7 +21007,7 @@ l6721h:
 	cp a			;6721
 	ret			;6722
 sub_6723h:
-	call sub_69dch		;6723
+	call ax25_prepare_address_header		;6723
 	push iy		;6726
 	pop hl			;6728
 	ld de,block_0000_end		;6729
@@ -21482,7 +21025,7 @@ l6734h:
 	add hl,bc			;673b
 	dec hl			;673c
 	ex de,hl			;673d
-	call sub_6ab1h		;673e
+	call ax25_callsign_compare		;673e
 	jr z,l6734h		;6741
 l6743h:
 	and a			;6743
@@ -21492,7 +21035,8 @@ l6745h:
 	jr z,l6743h		;6747
 	scf			;6749
 	ret			;674a
-sub_674bh:
+ax25_link_timeout_service:
+; Services AX.25 link timeout and retry state.
 	ld a,(iy+044h)		;674b
 	or a			;674e
 	jr z,l6766h		;674f
@@ -21503,11 +21047,12 @@ sub_674bh:
 	ret nz			;675c
 	res 7,(iy+066h)		;675d
 	ld a,003h		;6761
-	jp block_0053_end		;6763
+	jp block_0051_end		;6763
 l6766h:
 	bit 2,(iy+066h)		;6766
 	ret z			;676a
-sub_676bh:
+ax25_disconnect_or_reset_link:
+; Transitions or clears an AX.25 link and its timers and queues.
 	bit 2,(iy+066h)		;676b
 	jr z,l677fh		;676f
 	ld (iy+044h),001h		;6771
@@ -21530,7 +21075,7 @@ l677fh:
 	inc c			;679b
 	jr l67a3h		;679c
 l679eh:
-	call sub_1403h		;679e
+	call test_output_path_state		;679e
 	jr z,l67a8h		;67a1
 l67a3h:
 	push bc			;67a3
@@ -21556,13 +21101,14 @@ l67a8h:
 	call sub_693bh		;67ce
 	ret nz			;67d1
 	di			;67d2
-	call block_0101_end		;67d3
+	call block_0073_end		;67d3
 	ld hl,08ff0h		;67d6
-	call sub_18ebh		;67d9
-	call sub_179ch		;67dc
+	call list_clear		;67d9
+	call queue_ensure_block		;67dc
 	ei			;67df
 	ret			;67e0
-sub_67e1h:
+ax25_enter_connected_state:
+; Initializes link variables and enters connected state.
 	call sub_6ae2h		;67e1
 	jr nz,l67f3h		;67e4
 	ld a,(iy+065h)		;67e6
@@ -21571,12 +21117,12 @@ sub_67e1h:
 	set 6,(hl)		;67ef
 	res 3,(hl)		;67f1
 l67f3h:
-	call sub_69dch		;67f3
+	call ax25_prepare_address_header		;67f3
 	call sub_68e4h		;67f6
-	call sub_78d9h		;67f9
-	call block_0199_end		;67fc
-	call sub_7a63h		;67ff
-	call sub_7bdch		;6802
+	call ax25_classify_current_control		;67f9
+	call block_0161_end		;67fc
+	call emit_optional_ax25_address_metadata		;67ff
+	call mark_frame_buffer_complete		;6802
 	call sub_68bbh		;6805
 	ld (iy+044h),004h		;6808
 	ld a,(080aah)		;680c
@@ -21601,12 +21147,12 @@ sub_682fh:
 	set 6,(hl)		;683a
 	res 3,(hl)		;683c
 l683eh:
-	call sub_6927h		;683e
+	call ax25_reset_sequence_state		;683e
 	call sub_1586h		;6841
 	jr nc,l6852h		;6844
 	res 7,(iy+066h)		;6846
-	call block_0213_end		;684a
-	call sub_7d05h		;684d
+	call block_0171_end		;684a
+	call reset_receive_address_state		;684d
 	jr l685ch		;6850
 l6852h:
 	call block_0011_end		;6852
@@ -21635,7 +21181,7 @@ l6886h:
 	call sub_7b45h		;6886
 	res 2,(iy+067h)		;6889
 	set 4,(iy+066h)		;688d
-	call sub_0a62h		;6891
+	call update_battery_settings_checksum		;6891
 	jp sub_7b31h		;6894
 sub_6897h:
 	ld a,(080afh)		;6897
@@ -21646,7 +21192,7 @@ sub_6897h:
 	cp 08dh		;68a1
 	ret z			;68a3
 	call sub_1686h		;68a4
-	call sub_135ch		;68a7
+	call console_puts_highbit		;68a7
 	jp l16adh		;68aa
 sub_68adh:
 	ld hl,(08066h)		;68ad
@@ -21681,7 +21227,7 @@ l68d7h:
 l68dfh:
 	xor a			;68df
 	ld (de),a			;68e0
-	jp sub_0a62h		;68e1
+	jp update_battery_settings_checksum		;68e1
 sub_68e4h:
 	res 0,(iy+067h)		;68e4
 	res 2,(iy+067h)		;68e8
@@ -21706,14 +21252,15 @@ l690dh:
 	ld hl,08855h		;6915
 	ld bc,l0003h+1		;6918
 	ldir		;691b
-	jp sub_0a62h		;691d
+	jp update_battery_settings_checksum		;691d
 sub_6920h:
 	ld a,(iy+042h)		;6920
 	rrca			;6923
 	rrca			;6924
 	rrca			;6925
 	ret			;6926
-sub_6927h:
+ax25_reset_sequence_state:
+; Resets AX.25 sequence and pending-frame state.
 	ld a,(iy+040h)		;6927
 	ld (iy+041h),a		;692a
 	cp (iy+058h)		;692d
@@ -21770,7 +21317,7 @@ l697ch:
 	or a			;6984
 	jr z,l698fh		;6985
 	ld de,08076h		;6987
-	call sub_6ab1h		;698a
+	call ax25_callsign_compare		;698a
 	jr z,l6994h		;698d
 l698fh:
 	call sub_6aaeh		;698f
@@ -21789,7 +21336,7 @@ l69a6h:
 	ret			;69a7
 l69a8h:
 	set 7,(hl)		;69a8
-	call block_0199_end		;69aa
+	call block_0161_end		;69aa
 	ld de,(08895h)		;69ad
 	ld hl,(08897h)		;69b1
 	inc hl			;69b4
@@ -21802,20 +21349,21 @@ l69a8h:
 	jr l69cah		;69c1
 l69c3h:
 	ld de,(08891h)		;69c3
-	call sub_187dh		;69c7
+	call queue_get_byte		;69c7
 l69cah:
-	call sub_7bb9h		;69ca
+	call frame_buffer_append_byte		;69ca
 	dec bc			;69cd
 	ld a,b			;69ce
 	or c			;69cf
 	jr nz,l69c3h		;69d0
 l69d2h:
-	call sub_7bdch		;69d2
+	call mark_frame_buffer_complete		;69d2
 	ld hl,08015h		;69d5
 	set 3,(hl)		;69d8
 	cp a			;69da
 	ret			;69db
-sub_69dch:
+ax25_prepare_address_header:
+; Builds AX.25 source/destination address fields and C/end bits.
 	push bc			;69dc
 	call sub_6af0h		;69dd
 	ld hl,08019h		;69e0
@@ -21914,10 +21462,10 @@ l6a79h:
 	ld (hl),a			;6a80
 	pop bc			;6a81
 	ret			;6a82
-block_0188_end:
+block_0152_end:
 
-; BLOCK 'block_0189' (start 0x6a83 end 0x6a8b)
-block_0189_start:
+; BLOCK 'block_0153' (start 0x6a83 end 0x6a8b)
+block_0153_start:
 	defb 0a0h		;6a83
 	defb 096h		;6a84
 	defb 070h		;6a85
@@ -21927,10 +21475,10 @@ block_0189_start:
 l6a89h:
 	defb 060h		;6a89
 	defb 000h		;6a8a
-block_0189_end:
+block_0153_end:
 
-; BLOCK 'block_0190' (start 0x6a8b end 0x6d0c)
-block_0190_start:
+; BLOCK 'block_0154' (start 0x6a8b end 0x6e64)
+block_0154_start:
 	push bc			;6a8b
 	push de			;6a8c
 	push hl			;6a8d
@@ -21952,12 +21500,13 @@ sub_6a9ah:
 	jr sub_6aaeh		;6aa4
 sub_6aa6h:
 	ld hl,0884dh		;6aa6
-	jr sub_6ab1h		;6aa9
+	jr ax25_callsign_compare		;6aa9
 sub_6aabh:
 	ld hl,l6a89h		;6aab
 sub_6aaeh:
 	ld de,0806eh		;6aae
-sub_6ab1h:
+ax25_callsign_compare:
+; Compares six shifted callsign bytes and masked SSID bits; Z means equal.
 	push bc			;6ab1
 	push de			;6ab2
 	push hl			;6ab3
@@ -21983,7 +21532,8 @@ l6ac8h:
 	pop de			;6ac9
 	pop bc			;6aca
 	ret			;6acb
-sub_6acch:
+ax25_address_prefix_compare:
+; Compares the first two shifted address bytes with metadata masked.
 	ld a,(hl)			;6acc
 	inc hl			;6acd
 	and 0feh		;6ace
@@ -22024,7 +21574,7 @@ sub_6af3h:
 	ret nz			;6b02
 	ld de,0806eh		;6b03
 l6b06h:
-	jr sub_6ab1h		;6b06
+	jr ax25_callsign_compare		;6b06
 sub_6b08h:
 	bit 2,(iy+066h)		;6b08
 	ret nz			;6b0c
@@ -22035,8 +21585,8 @@ sub_6b08h:
 	ld a,0ffh		;6b16
 	ld (08820h),a		;6b18
 	ld hl,08fech		;6b1b
-	call sub_18ebh		;6b1e
-	call sub_179ch		;6b21
+	call list_clear		;6b1e
+	call queue_ensure_block		;6b21
 	call sub_153fh		;6b24
 	ret nc			;6b27
 	ld hl,0801ah		;6b28
@@ -22074,7 +21624,7 @@ sub_6b45h:
 sub_6b64h:
 	ld hl,0801bh		;6b64
 	set 6,(hl)		;6b67
-	call sub_003bh		;6b69
+	call service_deferred_queue		;6b69
 	call sub_702ah		;6b6c
 	ld a,03fh		;6b6f
 	rst 28h			;6b71
@@ -22088,20 +21638,20 @@ sub_6b64h:
 	add a,a			;6b80
 	add a,a			;6b81
 	ld l,a			;6b82
-	call sub_1304h		;6b83
+	call console_putchar_routed		;6b83
 	jr l6b8bh		;6b86
 l6b88h:
-	call sub_027dh		;6b88
+	call test_nonzero_and_output_status		;6b88
 l6b8bh:
 	ld de,(08891h)		;6b8b
-	call sub_1a13h		;6b8f
+	call initialize_record_cursor		;6b8f
 	ld bc,(08895h)		;6b92
 	jp l6ba4h		;6b96
 l6b99h:
-	call sub_187dh		;6b99
+	call queue_get_byte		;6b99
 	ei			;6b9c
 	push bc			;6b9d
-	call sub_1304h		;6b9e
+	call console_putchar_routed		;6b9e
 	xor l			;6ba1
 	ld l,a			;6ba2
 	pop bc			;6ba3
@@ -22109,11 +21659,12 @@ l6ba4h:
 	dec bc			;6ba4
 	bit 7,b		;6ba5
 	jr z,l6b99h		;6ba7
-	call sub_78d2h		;6ba9
+	call terminal_feature_mode_test		;6ba9
 	ld a,l			;6bac
-	call z,sub_1304h		;6bad
+	call z,console_putchar_routed		;6bad
 	jp sub_14b2h		;6bb0
-sub_6bb3h:
+ax25_received_frame_dispatch:
+; Validates and dispatches received AX.25 frame types.
 	ld (088d3h),a		;6bb3
 	ld hl,(088cfh)		;6bb6
 	ld de,0ff80h		;6bb9
@@ -22122,13 +21673,13 @@ sub_6bb3h:
 	ld a,(080b4h)		;6bbe
 	and 040h		;6bc1
 	jr nz,l6bc9h		;6bc3
-	call sub_1403h		;6bc5
+	call test_output_path_state		;6bc5
 	ret z			;6bc8
 l6bc9h:
 	ld a,(080aeh)		;6bc9
 	and 008h		;6bcc
 	jr nz,l6be4h		;6bce
-	call block_0195_end		;6bd0
+	call block_0157_end		;6bd0
 	jr nc,l6be4h		;6bd3
 	ld hl,0801fh		;6bd5
 	ld a,(08374h)		;6bd8
@@ -22196,7 +21747,7 @@ l6c49h:
 	and 040h		;6c4c
 	jr nz,l6c5eh		;6c4e
 	ld a,(0888dh)		;6c50
-	call sub_6e82h		;6c53
+	call block_0155_end		;6c53
 	jr nc,l6c5eh		;6c56
 	ld hl,0801fh		;6c58
 	set 7,(hl)		;6c5b
@@ -22207,13 +21758,13 @@ l6c5eh:
 	ld a,(080aeh)		;6c63
 	and 008h		;6c66
 	jr z,l6c70h		;6c68
-	call block_0195_end		;6c6a
+	call block_0157_end		;6c6a
 	call nc,sub_14a9h		;6c6d
 l6c70h:
-	call sub_003bh		;6c70
+	call service_deferred_queue		;6c70
 	call sub_702ah		;6c73
 	ld a,(088d3h)		;6c76
-	call sub_027dh		;6c79
+	call test_nonzero_and_output_status		;6c79
 	call sub_6f8dh		;6c7c
 	jp nz,l6da5h		;6c7f
 	ld a,(080adh)		;6c82
@@ -22223,7 +21774,7 @@ l6c70h:
 	and 010h		;6c8d
 	jr z,l6ca7h		;6c8f
 	ld a,024h		;6c91
-	call sub_1304h		;6c93
+	call console_putchar_routed		;6c93
 	ld hl,08847h		;6c96
 	call sub_6e2fh		;6c99
 	call sub_724bh		;6c9c
@@ -22232,26 +21783,26 @@ l6c70h:
 	jr l6cf5h		;6ca5
 l6ca7h:
 	ld hl,08854h		;6ca7
-	call block_0061_end		;6caa
-	call block_0051_end		;6cad
+	call block_0057_end		;6caa
+	call block_0049_end		;6cad
 	call nz,sub_6f95h		;6cb0
 	ld a,(080b0h)		;6cb3
 	and 002h		;6cb6
 	jr z,l6cefh		;6cb8
 	ld hl,08854h		;6cba
 	ld bc,l0007h		;6cbd
-	call block_0051_end		;6cc0
+	call block_0049_end		;6cc0
 	jr z,l6cdbh		;6cc3
 	jr l6cebh		;6cc5
 l6cc7h:
 	add hl,bc			;6cc7
 	ld a,03eh		;6cc8
-	call block_0051_end		;6cca
+	call block_0049_end		;6cca
 	jr z,l6cd1h		;6ccd
 	ld a,02ch		;6ccf
 l6cd1h:
-	call sub_1304h		;6cd1
-	call block_0061_end		;6cd4
+	call console_putchar_routed		;6cd1
+	call block_0057_end		;6cd4
 	bit 7,(hl)		;6cd7
 	jr z,l6cebh		;6cd9
 l6cdbh:
@@ -22264,16 +21815,16 @@ l6cdbh:
 	jr nz,l6cebh		;6ce4
 l6ce6h:
 	ld a,02ah		;6ce6
-	call sub_1304h		;6ce8
+	call console_putchar_routed		;6ce8
 l6cebh:
 	bit 0,(hl)		;6ceb
 	jr z,l6cc7h		;6ced
 l6cefh:
-	call block_0051_end		;6cef
+	call block_0049_end		;6cef
 	call z,sub_6f95h		;6cf2
 l6cf5h:
 	ld a,(0888dh)		;6cf5
-	call sub_6e82h		;6cf8
+	call block_0155_end		;6cf8
 	ld d,a			;6cfb
 	ld a,(hl)			;6cfc
 	cp 003h		;6cfd
@@ -22282,34 +21833,18 @@ l6cf5h:
 	cp 005h		;6d02
 	jp c,l6d98h		;6d04
 l6d07h:
-	call sub_12feh		;6d07
+	call print_space		;6d07
 	xor a			;6d0a
-	defb 0cdh		;6d0b
-block_0190_end:
-
-; BLOCK 'block_0191' (start 0x6d0c end 0x6d15)
-block_0191_start:
-; high-bit-terminated text, ends at 0x6d14: Pn!ln\t\t~M
-str_6d0c_pn_ln_t_t:
-	defb 050h		;6d0c
-	defb 06eh		;6d0d
-	defb 021h		;6d0e
-	defb 06ch		;6d0f
-	defb 06eh		;6d10
-	defb 009h		;6d11
-	defb 009h		;6d12
-	defb 07eh		;6d13
-	defb 0cdh		;6d14
-block_0191_end:
-
-; BLOCK 'block_0192' (start 0x6d15 end 0x6e64)
-block_0192_start:
-	inc b			;6d15
-	inc de			;6d16
+	call sub_6e50h		;6d0b
+	ld hl,l6e6ch		;6d0e
+	add hl,bc			;6d11
+	add hl,bc			;6d12
+	ld a,(hl)			;6d13
+	call console_putchar_routed		;6d14
 	inc hl			;6d17
 	ld a,(hl)			;6d18
 	or a			;6d19
-	call nz,sub_1304h		;6d1a
+	call nz,console_putchar_routed		;6d1a
 	ld a,(0888dh)		;6d1d
 	and 010h		;6d20
 	jr z,l6d48h		;6d22
@@ -22317,7 +21852,7 @@ block_0192_start:
 	cp 006h		;6d25
 	jr c,l6d48h		;6d27
 	ld a,02ch		;6d29
-	call sub_1304h		;6d2b
+	call console_putchar_routed		;6d2b
 	ld e,046h		;6d2e
 	ld hl,08017h		;6d30
 	bit 2,(hl)		;6d33
@@ -22333,7 +21868,7 @@ l6d42h:
 	ld e,050h		;6d42
 l6d44h:
 	ld a,e			;6d44
-	call sub_1304h		;6d45
+	call console_putchar_routed		;6d45
 l6d48h:
 	push bc			;6d48
 	ld a,c			;6d49
@@ -22343,7 +21878,7 @@ l6d48h:
 	cp 006h		;6d4f
 	jr c,l6d78h		;6d51
 	ld a,03bh		;6d53
-	call sub_1304h		;6d55
+	call console_putchar_routed		;6d55
 	ld a,(0888dh)		;6d58
 	ld e,a			;6d5b
 	rlca			;6d5c
@@ -22351,17 +21886,17 @@ l6d48h:
 	rlca			;6d5e
 	and 007h		;6d5f
 	or 030h		;6d61
-	call sub_1304h		;6d63
+	call console_putchar_routed		;6d63
 	ld a,e			;6d66
 	rra			;6d67
 	jr c,l6d78h		;6d68
 	ld a,02ch		;6d6a
-	call sub_1304h		;6d6c
+	call console_putchar_routed		;6d6c
 	ld a,e			;6d6f
 	rra			;6d70
 	and 007h		;6d71
 	or 030h		;6d73
-	call sub_1304h		;6d75
+	call console_putchar_routed		;6d75
 l6d78h:
 	ld a,001h		;6d78
 	call sub_6e50h		;6d7a
@@ -22379,13 +21914,13 @@ l6d78h:
 l6d90h:
 	ld a,(0888eh)		;6d90
 	cp 0f0h		;6d93
-	call nz,sub_12e7h		;6d95
+	call nz,print_hex_byte		;6d95
 l6d98h:
 	ld a,03ah		;6d98
-	call sub_1304h		;6d9a
+	call console_putchar_routed		;6d9a
 	ld a,(080ach)		;6d9d
 	and 001h		;6da0
-	call nz,l1302h		;6da2
+	call nz,print_carriage_return		;6da2
 l6da5h:
 	call sub_6e3dh		;6da5
 	ld a,(0888dh)		;6da8
@@ -22450,18 +21985,18 @@ l6e08h:
 	cp 00dh		;6e09
 	jr z,l6e13h		;6e0b
 	call sub_6f8dh		;6e0d
-	call z,l1302h		;6e10
+	call z,print_carriage_return		;6e10
 l6e13h:
 	jp sub_14b2h		;6e13
 l6e16h:
 	call sub_66cdh		;6e16
-	call sub_1179h		;6e19
+	call is_allowed_input_character		;6e19
 	jr c,l6e03h		;6e1c
 	ld e,a			;6e1e
-	call sub_1304h		;6e1f
+	call console_putchar_routed		;6e1f
 	jr l6e03h		;6e22
 l6e24h:
-	call sub_12feh		;6e24
+	call print_space		;6e24
 l6e27h:
 	ld b,c			;6e27
 	inc b			;6e28
@@ -22470,12 +22005,12 @@ l6e27h:
 sub_6e2fh:
 	ld a,(hl)			;6e2f
 	srl a		;6e30
-	call sub_12e7h		;6e32
+	call print_hex_byte		;6e32
 	inc hl			;6e35
 	ld a,(hl)			;6e36
 	rra			;6e37
 	and 03fh		;6e38
-	jp sub_12e7h		;6e3a
+	jp print_hex_byte		;6e3a
 sub_6e3dh:
 	ld hl,(08891h)		;6e3d
 	ld de,l000ah		;6e40
@@ -22491,18 +22026,18 @@ sub_6e50h:
 	ld a,(08017h)		;6e51
 	and 006h		;6e54
 	or l			;6e56
-	ld hl,block_0192_end		;6e57
+	ld hl,block_0154_end		;6e57
 	push de			;6e5a
 	ld d,000h		;6e5b
 	ld e,a			;6e5d
 	add hl,de			;6e5e
 	pop de			;6e5f
 	ld a,(hl)			;6e60
-	jp sub_1304h		;6e61
-block_0192_end:
+	jp console_putchar_routed		;6e61
+block_0154_end:
 
-; BLOCK 'block_0193' (start 0x6e64 end 0x6e84)
-block_0193_start:
+; BLOCK 'block_0155' (start 0x6e64 end 0x6e82)
+block_0155_start:
 	defb 03ch		;6e64
 	defb 03eh		;6e65
 	defb 03ch		;6e66
@@ -22511,6 +22046,7 @@ block_0193_start:
 	defb 029h		;6e69
 	defb 05bh		;6e6a
 	defb 05dh		;6e6b
+l6e6ch:
 	defb 03fh		;6e6c
 	defb 000h		;6e6d
 	defb 049h		;6e6e
@@ -22527,22 +22063,17 @@ block_0193_start:
 	defb 000h		;6e79
 	defb 044h		;6e7a
 	defb 000h		;6e7b
-; high-bit-terminated text, ends at 0x6e83: DMUAFR!>
-str_6e7c_dmuafr:
 	defb 044h		;6e7c
 	defb 04dh		;6e7d
 	defb 055h		;6e7e
 	defb 041h		;6e7f
 	defb 046h		;6e80
 	defb 052h		;6e81
-sub_6e82h:
-	defb 021h		;6e82
-	defb 0beh		;6e83
-block_0193_end:
+block_0155_end:
 
-; BLOCK 'block_0194' (start 0x6e84 end 0x6eb4)
-block_0194_start:
-	ld l,(hl)			;6e84
+; BLOCK 'block_0156' (start 0x6e82 end 0x6eb4)
+block_0156_start:
+	ld hl,l6ebeh		;6e82
 	ld b,00ah		;6e85
 	ld d,001h		;6e87
 	push af			;6e89
@@ -22576,10 +22107,10 @@ l6eaah:
 	add hl,bc			;6eb1
 	cp (hl)			;6eb2
 	ret			;6eb3
-block_0194_end:
+block_0156_end:
 
-; BLOCK 'block_0195' (start 0x6eb4 end 0x6ec9)
-block_0195_start:
+; BLOCK 'block_0157' (start 0x6eb4 end 0x6ec9)
+block_0157_start:
 	defb 000h		;6eb4
 	defb 001h		;6eb5
 	defb 005h		;6eb6
@@ -22602,27 +22133,27 @@ l6ebeh:
 	defb 004h		;6ec6
 	defb 004h		;6ec7
 	defb 005h		;6ec8
-block_0195_end:
+block_0157_end:
 
-; BLOCK 'block_0196' (start 0x6ec9 end 0x6f6b)
-block_0196_start:
+; BLOCK 'block_0158' (start 0x6ec9 end 0x6f6b)
+block_0158_start:
 	push hl			;6ec9
 	ld de,08854h		;6eca
 	ld a,(08374h)		;6ecd
 	or a			;6ed0
 	jr z,l6f14h		;6ed1
 	ld hl,0837ah		;6ed3
-	call sub_6ab1h		;6ed6
+	call ax25_callsign_compare		;6ed6
 	ld de,0884dh		;6ed9
 	jr z,l6efbh		;6edc
-	call sub_6ab1h		;6ede
+	call ax25_callsign_compare		;6ede
 	jr nz,l6f11h		;6ee1
 	ld a,(0837bh)		;6ee3
 	or a			;6ee6
 	jr z,l6ef4h		;6ee7
 	ld de,08854h		;6ee9
 	ld hl,08381h		;6eec
-	call sub_6ab1h		;6eef
+	call ax25_callsign_compare		;6eef
 	jr nz,l6f11h		;6ef2
 l6ef4h:
 	ld hl,08017h		;6ef4
@@ -22633,7 +22164,7 @@ l6efbh:
 	or a			;6efe
 	jr z,l6f09h		;6eff
 	ld hl,08381h		;6f01
-	call sub_6ab1h		;6f04
+	call ax25_callsign_compare		;6f04
 	jr nz,l6f11h		;6f07
 l6f09h:
 	ld hl,08017h		;6f09
@@ -22658,19 +22189,19 @@ l6f14h:
 	ld hl,(08339h)		;6f24
 	call sub_6f5fh		;6f27
 	ld e,a			;6f2a
-	ld hl,block_0196_end		;6f2b
+	ld hl,block_0158_end		;6f2b
 	add hl,de			;6f2e
 	ld a,(hl)			;6f2f
 	ld hl,08300h		;6f30
 	cp 001h		;6f33
 	jr nz,l6f3fh		;6f35
-	call block_0197_end		;6f37
+	call block_0159_end		;6f37
 	ld a,(082ffh)		;6f3a
 	jr l6f57h		;6f3d
 l6f3fh:
 	cp 002h		;6f3f
 	jr z,l6f4bh		;6f41
-	call block_0197_end		;6f43
+	call block_0159_end		;6f43
 	ld a,(082ffh)		;6f46
 	jr c,l6f5ah		;6f49
 l6f4bh:
@@ -22696,10 +22227,10 @@ l6f65h:
 	ret z			;6f67
 	set 0,a		;6f68
 	ret			;6f6a
-block_0196_end:
+block_0158_end:
 
-; BLOCK 'block_0197' (start 0x6f6b end 0x6f7b)
-block_0197_start:
+; BLOCK 'block_0159' (start 0x6f6b end 0x6f7b)
+block_0159_start:
 	defb 001h		;6f6b
 	defb 002h		;6f6c
 	defb 002h		;6f6d
@@ -22716,10 +22247,10 @@ block_0197_start:
 	defb 001h		;6f78
 	defb 002h		;6f79
 	defb 003h		;6f7a
-block_0197_end:
+block_0159_end:
 
-; BLOCK 'block_0198' (start 0x6f7b end 0x7250)
-block_0198_start:
+; BLOCK 'block_0160' (start 0x6f7b end 0x7250)
+block_0160_start:
 	ld de,08854h		;6f7b
 sub_6f7eh:
 	ld a,(hl)			;6f7e
@@ -22727,7 +22258,7 @@ sub_6f7eh:
 	ret z			;6f80
 	ld bc,block_0000_end		;6f81
 	add hl,bc			;6f84
-	call block_0189_end		;6f85
+	call block_0153_end		;6f85
 	inc hl			;6f88
 	jr nz,sub_6f7eh		;6f89
 	scf			;6f8b
@@ -22741,9 +22272,9 @@ sub_6f8dh:
 	ret			;6f94
 sub_6f95h:
 	ld a,03eh		;6f95
-	call sub_1304h		;6f97
+	call console_putchar_routed		;6f97
 	ld hl,0884dh		;6f9a
-	jp block_0061_end		;6f9d
+	jp block_0057_end		;6f9d
 sub_6fa0h:
 	call sub_14d0h		;6fa0
 	ret c			;6fa3
@@ -22813,47 +22344,47 @@ l7007h:
 	call sub_701fh		;7010
 	ld a,(08008h)		;7013
 	cp 002h		;7016
-	call nc,l1302h		;7018
+	call nc,print_carriage_return		;7018
 	pop hl			;701b
 	jp l70b1h		;701c
 sub_701fh:
-	call sub_003bh		;701f
+	call service_deferred_queue		;701f
 	call sub_702ah		;7022
 	ld a,03fh		;7025
-	jp sub_027dh		;7027
+	jp test_nonzero_and_output_status		;7027
 sub_702ah:
 	ld a,(088fah)		;702a
-	jp sub_027dh		;702d
+	jp test_nonzero_and_output_status		;702d
 sub_7030h:
 	call block_0041_end		;7030
 	ret c			;7033
-	call block_0051_end		;7034
+	call block_0049_end		;7034
 	ret nz			;7037
-	call sub_026fh		;7038
-	call sub_1479h		;703b
+	call prepare_and_queue_output		;7038
+	call print_prompt_marker		;703b
 	ld hl,08854h		;703e
-	call block_0061_end		;7041
+	call block_0057_end		;7041
 	ld hl,l7275h		;7044
 	jr l70b1h		;7047
 sub_7049h:
 	call sub_7153h		;7049
 	ret c			;704c
-	call sub_026fh		;704d
-	ld hl,block_0198_end		;7050
-	call sub_135ch		;7053
+	call prepare_and_queue_output		;704d
+	ld hl,block_0160_end		;7050
+	call console_puts_highbit		;7053
 	call sub_7bafh		;7056
 	ld b,003h		;7059
 l705bh:
-	call sub_12feh		;705b
+	call print_space		;705b
 	ld a,(hl)			;705e
-	call sub_12e7h		;705f
+	call print_hex_byte		;705f
 	inc hl			;7062
 	djnz l705bh		;7063
 	jr l70b4h		;7065
 l7067h:
 	call sub_7153h		;7067
 	ret c			;706a
-	call block_0051_end		;706b
+	call block_0049_end		;706b
 	ret nz			;706e
 	ld hl,08854h		;706f
 	call sub_6af3h		;7072
@@ -22864,12 +22395,12 @@ l7067h:
 	call sub_1573h		;707e
 	ret nc			;7081
 l7082h:
-	call sub_026fh		;7082
-	call sub_1479h		;7085
+	call prepare_and_queue_output		;7082
+	call print_prompt_marker		;7085
 	ld hl,l7264h		;7088
-	call sub_135ch		;708b
+	call console_puts_highbit		;708b
 	ld hl,0884dh		;708e
-	call block_0061_end		;7091
+	call block_0057_end		;7091
 	ld hl,08854h		;7094
 	bit 0,(hl)		;7097
 	inc hl			;7099
@@ -22884,25 +22415,25 @@ sub_70a7h:
 	call sub_146ah		;70ab
 	ld hl,l727ah		;70ae
 l70b1h:
-	call sub_135ch		;70b1
+	call console_puts_highbit		;70b1
 l70b4h:
-	call l1302h		;70b4
+	call print_carriage_return		;70b4
 	jp sub_14b2h		;70b7
 sub_70bah:
 	bit 4,(iy+066h)		;70ba
 	ret nz			;70be
 	call sub_7153h		;70bf
 	ret c			;70c2
-	call block_0055_end		;70c3
+	call block_0053_end		;70c3
 	call sub_146ah		;70c6
 	ld hl,l14e2h		;70c9
 l70cch:
-	call sub_135ch		;70cc
+	call console_puts_highbit		;70cc
 	push iy		;70cf
 	pop de			;70d1
 	ld hl,block_0000_end		;70d2
 	add hl,de			;70d5
-	call block_0061_end		;70d6
+	call block_0057_end		;70d6
 	inc hl			;70d9
 	ld a,(hl)			;70da
 	or a			;70db
@@ -22912,33 +22443,33 @@ l70e1h:
 	call sub_1586h		;70e1
 	jr nc,l70efh		;70e4
 l70e6h:
-	call block_0051_end		;70e6
+	call block_0049_end		;70e6
 	ld hl,l72b3h		;70e9
-	call z,sub_135ch		;70ec
+	call z,console_puts_highbit		;70ec
 l70efh:
 	jr l70b4h		;70ef
 sub_70f1h:
 	call block_0041_end		;70f1
 	ret c			;70f4
 	bit 4,(iy+066h)		;70f5
-	call nz,block_0055_end		;70f9
+	call nz,block_0053_end		;70f9
 	call sub_146ah		;70fc
 	ld hl,l2710h		;70ff
-	call sub_135ch		;7102
-	call block_0051_end		;7105
+	call console_puts_highbit		;7102
+	call block_0049_end		;7105
 	jr nz,l70b4h		;7108
 	ld hl,l7273h		;710a
 	jr l70cch		;710d
 sub_710fh:
 	call sub_7153h		;710f
 	ret c			;7112
-	call sub_026fh		;7113
+	call prepare_and_queue_output		;7113
 	ld hl,l725ah		;7116
-	call sub_135ch		;7119
+	call console_puts_highbit		;7119
 	call sub_6e3dh		;711c
 	ld b,c			;711f
 	inc b			;7120
-	call sub_12feh		;7121
+	call print_space		;7121
 	call sub_712ah		;7124
 	jp l70b4h		;7127
 sub_712ah:
@@ -22946,25 +22477,25 @@ sub_712ah:
 	jr l7136h		;712d
 l712fh:
 	ld de,(08891h)		;712f
-	call sub_187dh		;7133
+	call queue_get_byte		;7133
 l7136h:
-	call sub_12e7h		;7136
-	call sub_12feh		;7139
+	call print_hex_byte		;7136
+	call print_space		;7139
 	djnz l712fh		;713c
 	ret			;713e
 sub_713fh:
 	call sub_7153h		;713f
 	ret c			;7142
-	call block_0051_end		;7143
+	call block_0049_end		;7143
 	ret nz			;7146
-	call sub_026fh		;7147
-	call sub_1479h		;714a
+	call prepare_and_queue_output		;7147
+	call print_prompt_marker		;714a
 	ld hl,l729fh		;714d
 	jp l70b1h		;7150
 sub_7153h:
 	call block_0041_end		;7153
 	ret c			;7156
-	call sub_1403h		;7157
+	call test_output_path_state		;7157
 	scf			;715a
 	ret z			;715b
 	ccf			;715c
@@ -22975,16 +22506,16 @@ sub_715eh:
 	ret z			;7163
 	ld de,block_0000_end		;7164
 	add hl,de			;7167
-	jp block_0119_end		;7168
+	jp block_0093_end		;7168
 sub_716bh:
 	ld a,(0800bh)		;716b
 	and 010h		;716e
 	ret z			;7170
 	call sub_14d0h		;7171
 	ret c			;7174
-	call sub_003bh		;7175
+	call service_deferred_queue		;7175
 	ld de,(08891h)		;7178
-	call sub_1a13h		;717c
+	call initialize_record_cursor		;717c
 	ld hl,block_0000_start		;717f
 	ld (08841h),hl		;7182
 	jp l720dh		;7185
@@ -22997,41 +22528,41 @@ l7188h:
 	ld b,(hl)			;718f
 	ld (0883fh),bc		;7190
 	ei			;7194
-	call l1302h		;7195
+	call print_carriage_return		;7195
 	ld hl,(08841h)		;7198
 	ld a,h			;719b
-	call sub_12f0h		;719c
+	call print_hex_nibble		;719c
 	ld a,l			;719f
-	call sub_12e7h		;71a0
+	call print_hex_byte		;71a0
 	ld a,03ah		;71a3
-	call sub_1304h		;71a5
+	call console_putchar_routed		;71a5
 l71a8h:
 	ld a,l			;71a8
 	and 003h		;71a9
-	call z,sub_12feh		;71ab
+	call z,print_space		;71ab
 	call sub_7238h		;71ae
 	jr nc,l71bch		;71b1
-	call sub_187dh		;71b3
+	call queue_get_byte		;71b3
 	ei			;71b6
-	call sub_12e7h		;71b7
+	call print_hex_byte		;71b7
 	jr l71c2h		;71ba
 l71bch:
-	call sub_12feh		;71bc
-	call sub_12feh		;71bf
+	call print_space		;71bc
+	call print_space		;71bf
 l71c2h:
 	call sub_7230h		;71c2
 	ld a,l			;71c5
 	and 00fh		;71c6
 	jr nz,l71a8h		;71c8
-	call sub_12feh		;71ca
-	call sub_12feh		;71cd
-	call sub_12feh		;71d0
+	call print_space		;71ca
+	call print_space		;71cd
+	call print_space		;71d0
 	call sub_7219h		;71d3
 l71d6h:
 	call sub_7238h		;71d6
 	ld a,020h		;71d9
 	jr nc,l71e3h		;71db
-	call sub_187dh		;71dd
+	call queue_get_byte		;71dd
 	ei			;71e0
 	srl a		;71e1
 l71e3h:
@@ -23040,14 +22571,14 @@ l71e3h:
 	ld a,l			;71e9
 	and 00fh		;71ea
 	jr nz,l71d6h		;71ec
-	call sub_12feh		;71ee
-	call sub_12feh		;71f1
+	call print_space		;71ee
+	call print_space		;71f1
 	call sub_7219h		;71f4
 l71f7h:
 	call sub_7238h		;71f7
 	ld a,020h		;71fa
 	jr nc,l7202h		;71fc
-	call sub_187dh		;71fe
+	call queue_get_byte		;71fe
 	ei			;7201
 l7202h:
 	call sub_7243h		;7202
@@ -23058,7 +22589,7 @@ l7202h:
 l720dh:
 	call sub_7238h		;720d
 	jp c,l7188h		;7210
-	call l1302h		;7213
+	call print_carriage_return		;7213
 	jp sub_14b2h		;7216
 sub_7219h:
 	di			;7219
@@ -23092,11 +22623,11 @@ sub_7243h:
 sub_724bh:
 	ld a,02eh		;724b
 l724dh:
-	jp sub_1304h		;724d
-block_0198_end:
+	jp console_putchar_routed		;724d
+block_0160_end:
 
-; BLOCK 'block_0199' (start 0x7250 end 0x7363)
-block_0199_start:
+; BLOCK 'block_0161' (start 0x7250 end 0x7363)
+block_0161_start:
 ; high-bit-terminated text, ends at 0x7259: FRMR sent:
 str_7250_frmr_sent:
 	defb 046h		;7250
@@ -23431,26 +22962,26 @@ str_7356_mbx_sequence:
 	defb 06eh		;7360
 	defb 063h		;7361
 	defb 0e5h		;7362
-block_0199_end:
+block_0161_end:
 
-; BLOCK 'block_0200' (start 0x7363 end 0x741c)
-block_0200_start:
+; BLOCK 'block_0162' (start 0x7363 end 0x741c)
+block_0162_start:
 	call sub_7389h		;7363
 	ret c			;7366
 	ld de,(08fe2h)		;7367
-	call sub_17f9h		;736b
+	call queue_rotate_or_allocate		;736b
 	ld bc,(08897h)		;736e
 	ld hl,08847h		;7372
 	call sub_737eh		;7375
 	ld a,(0888dh)		;7378
-	jp sub_7bb9h		;737b
+	jp frame_buffer_append_byte		;737b
 sub_737eh:
 	dec bc			;737e
 	bit 7,b		;737f
 	ret nz			;7381
 	ld a,(hl)			;7382
 	inc hl			;7383
-	call sub_7bb9h		;7384
+	call frame_buffer_append_byte		;7384
 	jr sub_737eh		;7387
 sub_7389h:
 	push de			;7389
@@ -23481,7 +23012,7 @@ sub_73a5h:
 	ld a,(080d7h)		;73ac
 	and 001h		;73af
 	jr nz,l73d3h		;73b1
-	call sub_7bf1h		;73b3
+	call scc_b_dcd_state_test		;73b3
 	ret nz			;73b6
 	bit 3,(hl)		;73b7
 	jr z,l73bfh		;73b9
@@ -23499,12 +23030,12 @@ l73cfh:
 	call sub_53f9h		;73cf
 	ret c			;73d2
 l73d3h:
-	call sub_7742h		;73d3
-	jp c,l76f0h		;73d6
+	call terminal_start_allowed_test		;73d3
+	jp c,start_or_schedule_terminal_output		;73d6
 	ld a,(08015h)		;73d9
 	and 080h		;73dc
 	ret nz			;73de
-	call block_0201_end		;73df
+	call block_0163_end		;73df
 	jr c,l73e7h		;73e2
 	call sub_73eah		;73e4
 l73e7h:
@@ -23523,21 +23054,21 @@ sub_73eah:
 	cp 08dh		;73fe
 	jr z,l740fh		;7400
 	ld hl,080e0h		;7402
-	call sub_7bc2h		;7405
+	call allocate_frame_and_store_pointer		;7405
 	ret c			;7408
 	ld hl,08120h		;7409
-	call sub_7bcbh		;740c
+	call append_highbit_terminated_string		;740c
 l740fh:
 	ld hl,083f8h		;740f
 	ld a,(0804dh)		;7412
 	or a			;7415
-	jp nz,block_0161_end		;7416
+	jp nz,block_0135_end		;7416
 	ld (hl),0ffh		;7419
 	ret			;741b
-block_0200_end:
+block_0162_end:
 
-; BLOCK 'block_0201' (start 0x741c end 0x7424)
-block_0201_start:
+; BLOCK 'block_0163' (start 0x741c end 0x7424)
+block_0163_start:
 	defb 092h		;741c
 	defb 088h		;741d
 	defb 040h		;741e
@@ -23546,10 +23077,10 @@ block_0201_start:
 	defb 040h		;7421
 	defb 060h		;7422
 	defb 000h		;7423
-block_0201_end:
+block_0163_end:
 
-; BLOCK 'block_0202' (start 0x7424 end 0x7680)
-block_0202_start:
+; BLOCK 'block_0164' (start 0x7424 end 0x76e7)
+block_0164_start:
 	ld a,(080aah)		;7424
 	and 008h		;7427
 	ret z			;7429
@@ -23563,8 +23094,8 @@ block_0202_start:
 	ld a,(083f5h)		;7434
 	or a			;7437
 	ret nz			;7438
-	ld hl,block_0200_end		;7439
-	call sub_7bc2h		;743c
+	ld hl,block_0162_end		;7439
+	call allocate_frame_and_store_pointer		;743c
 	ret c			;743f
 	push bc			;7440
 	ld hl,08847h		;7441
@@ -23591,12 +23122,12 @@ l7460h:
 	djnz l7460h		;7464
 	pop hl			;7466
 	pop bc			;7467
-	call sub_7bcbh		;7468
+	call append_highbit_terminated_string		;7468
 	ret c			;746b
 	ld hl,08015h		;746c
 	res 4,(hl)		;746f
 	ld hl,083f5h		;7471
-	call block_0161_end		;7474
+	call block_0135_end		;7474
 	scf			;7477
 l7478h:
 	ld a,(iy+044h)		;7478
@@ -23605,16 +23136,16 @@ l7478h:
 	call sub_7b98h		;747f
 	or a			;7482
 	jr nz,l74a0h		;7483
-	call sub_7aa5h		;7485
+	call ax25_retry_timer_service		;7485
 	call sub_7b4fh		;7488
 	call sub_7049h		;748b
 	ld e,087h		;748e
-	call sub_794ch		;7490
+	call ax25_build_and_queue_frame		;7490
 	ret c			;7493
 	call sub_7bafh		;7494
 	ld bc,l0003h		;7497
 	call sub_737eh		;749a
-	jp sub_7bdch		;749d
+	jp mark_frame_buffer_complete		;749d
 l74a0h:
 	bit 1,(iy+056h)		;74a0
 	jr z,l74aah		;74a4
@@ -23630,7 +23161,7 @@ l74aah:
 	ld a,(iy+056h)		;74b9
 	ld b,007h		;74bc
 	ld c,(iy+057h)		;74be
-	ld hl,block_0204_end		;74c1
+	ld hl,block_0164_end		;74c1
 	jr z,l74d7h		;74c4
 	ld e,a			;74c6
 	ld a,c			;74c7
@@ -23667,8 +23198,8 @@ l74f6h:
 	or e			;74f6
 	ld e,a			;74f7
 	push bc			;74f8
-	call sub_794ch		;74f9
-	call sub_7bdch		;74fc
+	call ax25_build_and_queue_frame		;74f9
+	call mark_frame_buffer_complete		;74fc
 	pop bc			;74ff
 	pop af			;7500
 	pop hl			;7501
@@ -23684,7 +23215,7 @@ l7504h:
 	bit 5,(iy+066h)		;7515
 	res 5,(iy+066h)		;7519
 	call nz,sub_7b01h		;751d
-	jp l76f0h		;7520
+	jp start_or_schedule_terminal_output		;7520
 sub_7523h:
 	ld a,(iy+044h)		;7523
 	or a			;7526
@@ -23707,7 +23238,7 @@ l7536h:
 	cp (iy+058h)		;754b
 	jr z,l7561h		;754e
 l7550h:
-	call sub_7aa5h		;7550
+	call ax25_retry_timer_service		;7550
 	bit 0,(iy+066h)		;7553
 	call sub_76d8h		;7557
 	ld e,00fh		;755a
@@ -23815,7 +23346,7 @@ l75fah:
 	call sub_7389h		;7618
 	jp c,l76cfh		;761b
 	ld de,(08fe2h)		;761e
-	call sub_17f9h		;7622
+	call queue_rotate_or_allocate		;7622
 	ei			;7625
 	jr l7664h		;7626
 l7628h:
@@ -23823,7 +23354,7 @@ l7628h:
 	jr nz,l7664h		;762b
 	push hl			;762d
 	ld hl,080e0h		;762e
-	call sub_7931h		;7631
+	call ax25_send_frame_from_pointer		;7631
 	pop hl			;7634
 	jr l765eh		;7635
 l7637h:
@@ -23845,7 +23376,7 @@ l7653h:
 l7655h:
 	ld hl,08014h		;7655
 	set 4,(hl)		;7658
-	call sub_794ch		;765a
+	call ax25_build_and_queue_frame		;765a
 	pop hl			;765d
 l765eh:
 	jp c,l76cfh		;765e
@@ -23865,41 +23396,31 @@ l7664h:
 	ld e,(hl)			;7676
 	inc hl			;7677
 	ld d,(hl)			;7678
-	call sub_1a13h		;7679
+	call initialize_record_cursor		;7679
 	ld hl,l000ah+2		;767c
 	add hl,de			;767f
-block_0202_end:
-
-; BLOCK 'block_0203' (start 0x7680 end 0x7685)
-block_0203_start:
-; high-bit-terminated text, ends at 0x7684: Ny,F0
-str_7680_ny_f0:
-	defb 04eh		;7680
-	defb 079h		;7681
-	defb 02ch		;7682
-	defb 046h		;7683
-	defb 0b0h		;7684
-block_0203_end:
-
-; BLOCK 'block_0204' (start 0x7685 end 0x76e7)
-block_0204_start:
+	ld c,(hl)			;7680
+	ld a,c			;7681
+	inc l			;7682
+	ld b,(hl)			;7683
+	or b			;7684
 	jr z,l76c7h		;7685
 	call sub_7389h		;7687
 	jr c,l76c7h		;768a
 	ld hl,(08fe2h)		;768c
 l768fh:
-	call sub_187dh		;768f
+	call queue_get_byte		;768f
 	ex de,hl			;7692
-	call sub_17feh		;7693
+	call queue_increment_counter_and_put		;7693
 	ex de,hl			;7696
 	ei			;7697
 	dec bc			;7698
 	ld a,b			;7699
 	or c			;769a
 	jr nz,l768fh		;769b
-	call sub_7bdch		;769d
+	call mark_frame_buffer_complete		;769d
 	res 0,(iy+056h)		;76a0
-	call block_0211_end		;76a4
+	call block_0169_end		;76a4
 l76a7h:
 	pop de			;76a7
 	ld a,d			;76a8
@@ -23917,7 +23438,7 @@ l76a7h:
 	rrca			;76bc
 	rrca			;76bd
 	and 0e0h		;76be
-	call sub_6410h		;76c0
+	call ax25_advance_receive_window		;76c0
 	pop de			;76c3
 l76c4h:
 	jp l75fah		;76c4
@@ -23927,7 +23448,7 @@ l76c7h:
 	call sub_16cah		;76cb
 	ei			;76ce
 l76cfh:
-	jp block_0211_end		;76cf
+	jp block_0169_end		;76cf
 sub_76d2h:
 	ld a,(0801bh)		;76d2
 	and 001h		;76d5
@@ -23942,10 +23463,10 @@ l76e2h:
 	set 5,(hl)		;76e2
 	set 4,(hl)		;76e4
 	ret			;76e6
-block_0204_end:
+block_0164_end:
 
-; BLOCK 'block_0205' (start 0x76e7 end 0x76ee)
-block_0205_start:
+; BLOCK 'block_0165' (start 0x76e7 end 0x76ee)
+block_0165_start:
 	defb 001h		;76e7
 	defb 009h		;76e8
 	defb 005h		;76e9
@@ -23953,28 +23474,29 @@ block_0205_start:
 	defb 063h		;76eb
 	defb 053h		;76ec
 	defb 00fh		;76ed
-block_0205_end:
+block_0165_end:
 
-; BLOCK 'block_0206' (start 0x76ee end 0x777d)
-block_0206_start:
+; BLOCK 'block_0166' (start 0x76ee end 0x777d)
+block_0166_start:
 	ei			;76ee
 	ret			;76ef
-l76f0h:
+start_or_schedule_terminal_output:
+; Schedules or starts channel B terminal output.
 	ld a,(080d7h)		;76f0
 	and 001h		;76f3
 	jr nz,l76fbh		;76f5
-	call sub_7bf1h		;76f7
+	call scc_b_dcd_state_test		;76f7
 	ret nz			;76fa
 l76fbh:
-	call sub_7742h		;76fb
+	call terminal_start_allowed_test		;76fb
 	jr c,l7715h		;76fe
 	ld hl,08fe0h		;7700
-	call sub_18ddh		;7703
-	jr z,block_0205_end		;7706
+	call list_is_empty		;7703
+	jr z,block_0165_end		;7706
 	ld hl,l000eh		;7708
 	add hl,de			;770b
 	bit 0,(hl)		;770c
-	jr nz,block_0205_end		;770e
+	jr nz,block_0165_end		;770e
 	ld hl,08015h		;7710
 	res 3,(hl)		;7713
 l7715h:
@@ -23985,10 +23507,10 @@ l7715h:
 	jr nz,l7740h		;771b
 	inc (hl)			;771d
 	ld hl,083ddh		;771e
-	call block_0161_end		;7721
-	call sub_7742h		;7724
-	call c,sub_7763h		;7727
-	call sub_1386h		;772a
+	call block_0135_end		;7721
+	call terminal_start_allowed_test		;7724
+	call c,scc_b_reinitialize		;7727
+	call terminal_rts_assert		;772a
 	ld a,(0802bh)		;772d
 	ld b,a			;7730
 	ld a,(083dch)		;7731
@@ -24002,7 +23524,8 @@ l773ch:
 l7740h:
 	ei			;7740
 	ret			;7741
-sub_7742h:
+terminal_start_allowed_test:
+; Tests terminal pacing and status to decide whether transmission may start.
 	ld a,(0804ch)		;7742
 	or a			;7745
 	ret z			;7746
@@ -24027,12 +23550,13 @@ l7756h:
 	ret nz			;7760
 	and a			;7761
 	ret			;7762
-sub_7763h:
+scc_b_reinitialize:
+; Writes the runtime SCC-B initialization table.
 	ld hl,08015h		;7763
 	set 7,(hl)		;7766
 	res 6,(hl)		;7768
 	ld b,020h		;776a
-	ld hl,block_0206_end		;776c
+	ld hl,block_0166_end		;776c
 l776fh:
 	ld a,(hl)			;776f
 	inc hl			;7770
@@ -24040,11 +23564,11 @@ l776fh:
 	djnz l776fh		;7773
 	ld a,018h		;7775
 	ld (08006h),a		;7777
-	jp sub_1386h		;777a
-block_0206_end:
+	jp terminal_rts_assert		;777a
+block_0166_end:
 
-; BLOCK 'block_0207' (start 0x777d end 0x779d)
-block_0207_start:
+; BLOCK 'block_0167' (start 0x777d end 0x779d)
+block_0167_start:
 	defb 009h		;777d
 	defb 081h		;777e
 	defb 004h		;777f
@@ -24077,10 +23601,12 @@ block_0207_start:
 	defb 010h		;779a
 	defb 009h		;779b
 	defb 009h		;779c
-block_0207_end:
+block_0167_end:
 
-; BLOCK 'block_0208' (start 0x779d end 0x7aaf)
-block_0208_start:
+; BLOCK 'block_0168' (start 0x779d end 0x7b19)
+block_0168_start:
+; Runs the channel B transmit state machine and sends queued data.
+terminal_tx_state_machine:
 	ld a,(08022h)		;779d
 	or a			;77a0
 	ret z			;77a1
@@ -24094,15 +23620,15 @@ block_0208_start:
 	ld a,(083ddh)		;77ac
 	or a			;77af
 	jr z,l77ceh		;77b0
-	call sub_7742h		;77b2
+	call terminal_start_allowed_test		;77b2
 	jr nc,l77beh		;77b5
 	di			;77b7
-	call sub_7763h		;77b8
+	call scc_b_reinitialize		;77b8
 	ei			;77bb
 	jr l77f0h		;77bc
 l77beh:
 	ld hl,08fe0h		;77be
-	call sub_18ddh		;77c1
+	call list_is_empty		;77c1
 	jr z,l77ceh		;77c4
 	ld hl,l000eh		;77c6
 	add hl,de			;77c9
@@ -24111,7 +23637,7 @@ l77beh:
 l77ceh:
 	xor a			;77ce
 	ld (08022h),a		;77cf
-	call sub_13b2h		;77d2
+	call terminal_rts_deassert		;77d2
 	ei			;77d5
 	push iy		;77d6
 	ld iy,0840dh		;77d8
@@ -24140,7 +23666,7 @@ l77f0h:
 	ld a,0ffh		;7804
 	ld (088ddh),a		;7806
 	ld hl,083f6h		;7809
-	call block_0161_end		;780c
+	call block_0135_end		;780c
 	ld a,032h		;780f
 	jp l7c47h		;7811
 l7814h:
@@ -24157,13 +23683,13 @@ l7814h:
 	inc l			;7829
 	set 0,(hl)		;782a
 	rst 18h			;782c
-	jr nz,l785ch		;782d
+	jr nz,scc_b_start_buffer_transmit		;782d
 	ld hl,080b3h		;782f
 	bit 6,(hl)		;7832
-	jr z,l785ch		;7834
+	jr z,scc_b_start_buffer_transmit		;7834
 	push iy		;7836
 	ld a,(0889ch)		;7838
-	call sub_112bh		;783b
+	call select_channel_context		;783b
 	call sub_5c46h		;783e
 	call sub_716bh		;7841
 	call sub_6b45h		;7844
@@ -24175,24 +23701,25 @@ l7814h:
 	jr nz,l7857h		;7853
 	ld a,03fh		;7855
 l7857h:
-	call sub_6bb3h		;7857
+	call ax25_received_frame_dispatch		;7857
 	pop iy		;785a
-l785ch:
+scc_b_start_buffer_transmit:
+; Starts transmitting the current buffer through SCC B data.
 	di			;785c
 	ld a,080h		;785d
 	out (SCC_B_CTRL),a		;785f
 	ld de,(08fe0h)		;7861
-	call sub_1a13h		;7865
+	call initialize_record_cursor		;7865
 	rst 28h			;7868
 	jr z,l7894h		;7869
 	ld hl,(088a3h)		;786b
 	dec hl			;786e
-	call sub_78d2h		;786f
+	call terminal_feature_mode_test		;786f
 	jr nz,l7875h		;7872
 	dec hl			;7874
 l7875h:
 	ld (088a3h),hl		;7875
-	call sub_187dh		;7878
+	call queue_get_byte		;7878
 	ld (088abh),a		;787b
 	and 00fh		;787e
 	cp 00ch		;7880
@@ -24200,13 +23727,13 @@ l7875h:
 	dec hl			;7884
 	dec hl			;7885
 	ld (088a3h),hl		;7886
-	call sub_187dh		;7889
+	call queue_get_byte		;7889
 	ld l,a			;788c
-	call sub_187dh		;788d
+	call queue_get_byte		;788d
 	ld h,a			;7890
 	ld (088ach),hl		;7891
 l7894h:
-	call sub_187dh		;7894
+	call queue_get_byte		;7894
 	out (SCC_B_DATA),a		;7897
 	ld hl,088afh		;7899
 	ld a,0cah		;789c
@@ -24224,30 +23751,33 @@ l7894h:
 	ret nz			;78b1
 	call sub_702ah		;78b2
 	ld a,(hl)			;78b5
-	call sub_1304h		;78b6
+	call console_putchar_routed		;78b6
 	ld e,a			;78b9
 	inc hl			;78ba
 	ld a,(hl)			;78bb
-	call sub_1304h		;78bc
+	call console_putchar_routed		;78bc
 	xor e			;78bf
 	ld e,a			;78c0
 	inc hl			;78c1
 	ld a,(hl)			;78c2
-	call sub_1304h		;78c3
+	call console_putchar_routed		;78c3
 	xor e			;78c6
 	ld e,a			;78c7
-	call sub_78d2h		;78c8
+	call terminal_feature_mode_test		;78c8
 	ld a,e			;78cb
-	call z,sub_1304h		;78cc
+	call z,console_putchar_routed		;78cc
 	jp sub_14b2h		;78cf
-sub_78d2h:
+terminal_feature_mode_test:
+; Tentative test for alternate terminal framing/output mode.
 	ld a,(080d6h)		;78d2
 	cpl			;78d5
 	and 009h		;78d6
 	ret			;78d8
-sub_78d9h:
+ax25_classify_current_control:
+; Classifies the current AX.25 control field from SRAM 0x888d.
 	ld de,(0888dh)		;78d9
-sub_78ddh:
+ax25_classify_control_field:
+; Classifies AX.25 control field DE into state bits at SRAM 0x8016.
 	call sub_7927h		;78dd
 	call l671bh		;78e0
 	ret z			;78e3
@@ -24293,7 +23823,8 @@ sub_7927h:
 	res 6,(hl)		;792c
 	res 5,(hl)		;792e
 	ret			;7930
-sub_7931h:
+ax25_send_frame_from_pointer:
+; Builds and queues a frame from HL; carry reports allocation failure.
 	ld (0883fh),hl		;7931
 	call sub_6aabh		;7934
 	scf			;7937
@@ -24307,10 +23838,11 @@ sub_7931h:
 	push de			;7946
 	call sub_7927h		;7947
 	jr l7968h		;794a
-sub_794ch:
+ax25_build_and_queue_frame:
+; Allocates, addresses, and queues an AX.25 frame.
 	call sub_7389h		;794c
 	ret c			;794f
-	call sub_78ddh		;7950
+	call ax25_classify_control_field		;7950
 	push de			;7953
 	push iy		;7954
 	pop hl			;7956
@@ -24324,7 +23856,7 @@ l7964h:
 	ld (0883fh),hl		;7965
 l7968h:
 	ld de,(08fe2h)		;7968
-	call sub_17f9h		;796c
+	call queue_rotate_or_allocate		;796c
 	ld hl,(0883fh)		;796f
 	ld b,001h		;7972
 	ld a,(08016h)		;7974
@@ -24342,16 +23874,16 @@ l797dh:
 	jr z,l7996h		;798d
 	set 7,b		;798f
 	bit 7,a		;7991
-	call z,block_0211_end		;7993
+	call z,block_0169_end		;7993
 l7996h:
 	ld a,b			;7996
-	call sub_7bb9h		;7997
+	call frame_buffer_append_byte		;7997
 	inc hl			;799a
-	call sub_79b4h		;799b
+	call ax25_emit_address_fields		;799b
 	pop hl			;799e
 	ld a,l			;799f
-	call sub_7bb9h		;79a0
-	call sub_7a63h		;79a3
+	call frame_buffer_append_byte		;79a0
+	call emit_optional_ax25_address_metadata		;79a3
 	ld hl,08014h		;79a6
 	res 7,(hl)		;79a9
 	ld hl,(088cfh)		;79ab
@@ -24359,7 +23891,8 @@ l7996h:
 	add hl,de			;79b1
 	ccf			;79b2
 	ret			;79b3
-sub_79b4h:
+ax25_emit_address_fields:
+; Emits shifted AX.25 address bytes with command/response and end bits.
 	ld a,(08016h)		;79b4
 	and 080h		;79b7
 	jr z,l79d5h		;79b9
@@ -24375,7 +23908,7 @@ sub_79b4h:
 l79cfh:
 	ld a,b			;79cf
 	or 001h		;79d0
-	jp sub_7bb9h		;79d2
+	jp frame_buffer_append_byte		;79d2
 l79d5h:
 	push hl			;79d5
 	ld b,006h		;79d6
@@ -24424,11 +23957,12 @@ l7a1fh:
 	jr nz,l7a26h		;7a22
 	or 001h		;7a24
 l7a26h:
-	call sub_7bb9h		;7a26
+	call frame_buffer_append_byte		;7a26
 	pop bc			;7a29
 	djnz l7a14h		;7a2a
 	ret			;7a2c
-sub_7a2dh:
+pack_ax25_address_hash:
+; Packs seven address bytes into a compact hash-like representation.
 	ld d,(hl)			;7a2d
 	inc hl			;7a2e
 	ld c,(hl)			;7a2f
@@ -24459,7 +23993,7 @@ sub_7a2dh:
 	rla			;7a4d
 	and 07fh		;7a4e
 	ld l,a			;7a50
-	call sub_7bb9h		;7a51
+	call frame_buffer_append_byte		;7a51
 	ld a,c			;7a54
 	rra			;7a55
 	rra			;7a56
@@ -24470,22 +24004,23 @@ sub_7a2dh:
 	and 00fh		;7a5c
 	or c			;7a5e
 	ld h,a			;7a5f
-	jp sub_7bb9h		;7a60
-sub_7a63h:
+	jp frame_buffer_append_byte		;7a60
+emit_optional_ax25_address_metadata:
+; Emits optional packed AX.25 address metadata.
 	ld a,(08016h)		;7a63
 	bit 5,a		;7a66
 	jr z,l7a8ah		;7a68
 	ld a,001h		;7a6a
-	call sub_7bb9h		;7a6c
+	call frame_buffer_append_byte		;7a6c
 	push iy		;7a6f
 	pop hl			;7a71
 	ld bc,block_0000_start		;7a72
 	add hl,bc			;7a75
-	call sub_7a2dh		;7a76
+	call pack_ax25_address_hash		;7a76
 	add hl,hl			;7a79
 	ld (08855h),hl		;7a7a
 	ld hl,08068h		;7a7d
-	call sub_7a2dh		;7a80
+	call pack_ax25_address_hash		;7a80
 	add hl,hl			;7a83
 	ld (08857h),hl		;7a84
 	jp l690dh		;7a87
@@ -24493,7 +24028,7 @@ l7a8ah:
 	bit 6,a		;7a8a
 	ret z			;7a8c
 	ld a,001h		;7a8d
-	call sub_7bb9h		;7a8f
+	call frame_buffer_append_byte		;7a8f
 	push iy		;7a92
 	pop hl			;7a94
 	ld bc,l000eh		;7a95
@@ -24502,40 +24037,26 @@ l7a8ah:
 l7a9bh:
 	ld a,(hl)			;7a9b
 	srl a		;7a9c
-	call sub_7bb9h		;7a9e
+	call frame_buffer_append_byte		;7a9e
 	inc hl			;7aa1
 	djnz l7a9bh		;7aa2
 	ret			;7aa4
-sub_7aa5h:
+ax25_retry_timer_service:
+; Updates retries and triggers retransmission or state transitions.
 	ld a,(iy+044h)		;7aa5
 	or a			;7aa8
 	ret z			;7aa9
 	dec a			;7aaa
 	jr nz,l7ab3h		;7aab
-	defb 0fdh,0cbh		;7aad
-block_0208_end:
-
-; BLOCK 'block_0209' (start 0x7aaf end 0x7ab5)
-block_0209_start:
-; high-bit-terminated text, ends at 0x7ab4: fV g:\t
-str_7aaf_fv_g_t:
-	defb 066h		;7aaf
-	defb 056h		;7ab0
-	defb 020h		;7ab1
-	defb 067h		;7ab2
+	bit 2,(iy+066h)		;7aad
+	jr nz,block_0169_end		;7ab1
 l7ab3h:
-	defb 03ah		;7ab3
-	defb 089h		;7ab4
-block_0209_end:
-
-; BLOCK 'block_0210' (start 0x7ab5 end 0x7b19)
-block_0210_start:
-	add a,b			;7ab5
+	ld a,(08089h)		;7ab3
 	or a			;7ab6
-	jr z,block_0211_end		;7ab7
+	jr z,block_0169_end		;7ab7
 	inc (iy+045h)		;7ab9
 	cp (iy+045h)		;7abc
-	jr nc,block_0211_end		;7abf
+	jr nc,block_0169_end		;7abf
 	dec (iy+045h)		;7ac1
 	ld a,(iy+044h)		;7ac4
 	cp 002h		;7ac7
@@ -24551,7 +24072,7 @@ l7acfh:
 	jr z,l7ae6h		;7adc
 	call sub_7b07h		;7ade
 	call z,sub_713fh		;7ae1
-	jr block_0211_end		;7ae4
+	jr block_0169_end		;7ae4
 l7ae6h:
 	call sub_713fh		;7ae6
 	ld a,(iy+044h)		;7ae9
@@ -24562,11 +24083,11 @@ l7ae6h:
 	ld hl,08014h		;7af4
 	set 4,(hl)		;7af7
 	ld e,053h		;7af9
-	call sub_794ch		;7afb
-	call sub_7bdch		;7afe
+	call ax25_build_and_queue_frame		;7afb
+	call mark_frame_buffer_complete		;7afe
 sub_7b01h:
 	call sub_7b14h		;7b01
-	jp sub_676bh		;7b04
+	jp ax25_disconnect_or_reset_link		;7b04
 sub_7b07h:
 	bit 2,(iy+066h)		;7b07
 	ret nz			;7b0b
@@ -24579,15 +24100,15 @@ sub_7b14h:
 	xor a			;7b14
 	ld (iy+045h),a		;7b15
 	dec a			;7b18
-block_0210_end:
+block_0168_end:
 
-; BLOCK 'block_0211' (start 0x7b19 end 0x7b1a)
-block_0211_start:
+; BLOCK 'block_0169' (start 0x7b19 end 0x7b1a)
+block_0169_start:
 	defb 0cah		;7b19
-block_0211_end:
+block_0169_end:
 
-; BLOCK 'block_0212' (start 0x7b1a end 0x7cb4)
-block_0212_start:
+; BLOCK 'block_0170' (start 0x7b1a end 0x7cb4)
+block_0170_start:
 	ld a,0feh		;7b1a
 	push hl			;7b1c
 	push de			;7b1d
@@ -24652,7 +24173,7 @@ l7b77h:
 	ret			;7b79
 l7b7ah:
 	ld hl,083d9h		;7b7a
-	call block_0161_end		;7b7d
+	call block_0135_end		;7b7d
 	pop de			;7b80
 	pop hl			;7b81
 	ret			;7b82
@@ -24660,7 +24181,7 @@ sub_7b83h:
 	ld hl,083d9h		;7b83
 	ld a,(0802fh)		;7b86
 	or a			;7b89
-	jp nz,block_0161_end		;7b8a
+	jp nz,block_0135_end		;7b8a
 	call sub_68adh		;7b8d
 	inc a			;7b90
 	ld e,05ah		;7b91
@@ -24689,29 +24210,33 @@ sub_7bafh:
 	ret			;7bb6
 sub_7bb7h:
 	ld a,0f0h		;7bb7
-sub_7bb9h:
+frame_buffer_append_byte:
+; Appends A to the current transmit-frame buffer.
 	ld de,(08fe2h)		;7bb9
-	call sub_17feh		;7bbd
+	call queue_increment_counter_and_put		;7bbd
 	ei			;7bc0
 	ret			;7bc1
-sub_7bc2h:
-	call sub_7931h		;7bc2
+allocate_frame_and_store_pointer:
+; Allocates a frame buffer for source pointer HL; carry reports failure.
+	call ax25_send_frame_from_pointer		;7bc2
 	ret c			;7bc5
 	call sub_7bb7h		;7bc6
 	and a			;7bc9
 	ret			;7bca
-sub_7bcbh:
+append_highbit_terminated_string:
+; Appends a high-bit-terminated string at HL to the current frame.
 	call sub_7389h		;7bcb
 	jr c,l7be7h		;7bce
 l7bd0h:
 	ld a,(hl)			;7bd0
 	and 07fh		;7bd1
-	call sub_7bb9h		;7bd3
+	call frame_buffer_append_byte		;7bd3
 	bit 7,(hl)		;7bd6
 	inc bc			;7bd8
 	inc hl			;7bd9
 	jr z,l7bd0h		;7bda
-sub_7bdch:
+mark_frame_buffer_complete:
+; Clears the incomplete bit in current frame metadata.
 	ld hl,(08fe2h)		;7bdc
 	ld de,l000eh		;7bdf
 	add hl,de			;7be2
@@ -24723,10 +24248,12 @@ l7be7h:
 	call sub_16cah		;7bea
 	scf			;7bed
 	ret			;7bee
-sub_7befh:
+return_zero:
+; Returns A=0.
 	xor a			;7bef
 	ret			;7bf0
-sub_7bf1h:
+scc_b_dcd_state_test:
+; Compares channel B DCD with its saved state.
 	in a,(SCC_B_CTRL)		;7bf1
 	and 008h		;7bf3
 	ret nz			;7bf5
@@ -24753,7 +24280,8 @@ sub_7c02h:
 l7c16h:
 	ld e,003h		;7c16
 	jp l632ch		;7c18
-sub_7c1bh:
+service_terminal_tx_timing:
+; Maintains terminal transmit timing and toggles SCC-B WR5 state.
 	ld a,(08015h)		;7c1b
 	and 080h		;7c1e
 	ret z			;7c20
@@ -24771,7 +24299,7 @@ sub_7c1bh:
 	jr c,l7c5ah		;7c35
 	ld a,(088ddh)		;7c37
 	cp 006h		;7c3a
-	jr nc,l7c9dh		;7c3c
+	jr nc,finish_terminal_tx_phase		;7c3c
 	ld a,(de)			;7c3e
 	and 0feh		;7c3f
 	ld a,006h		;7c41
@@ -24834,11 +24362,12 @@ l7c97h:
 	ld a,020h		;7c97
 	ld (083dah),a		;7c99
 	ret			;7c9c
-l7c9dh:
+finish_terminal_tx_phase:
+; Completes terminal transmission and clears active state.
 	di			;7c9d
 	call block_0021_end		;7c9e
 sub_7ca1h:
-	call sub_13b2h		;7ca1
+	call terminal_rts_deassert		;7ca1
 	ld a,003h		;7ca4
 	ld (08022h),a		;7ca6
 	ld hl,08015h		;7ca9
@@ -24847,10 +24376,10 @@ sub_7ca1h:
 	ld (083d8h),a		;7caf
 	ei			;7cb2
 	ret			;7cb3
-block_0212_end:
+block_0170_end:
 
-; BLOCK 'block_0213' (start 0x7cb4 end 0x7cdf)
-block_0213_start:
+; BLOCK 'block_0171' (start 0x7cb4 end 0x7cdf)
+block_0171_start:
 	defb 03fh		;7cb4
 	defb 03eh		;7cb5
 	defb 03ch		;7cb6
@@ -24894,17 +24423,19 @@ block_0213_start:
 	defb 019h		;7cdc
 	defb 01dh		;7cdd
 	defb 013h		;7cde
-block_0213_end:
+block_0171_end:
 
-; BLOCK 'block_0214' (start 0x7cdf end 0x7d2c)
-block_0214_start:
+; BLOCK 'block_0172' (start 0x7cdf end 0x7d2c)
+block_0172_start:
+; Initializes link receive context and copies its AX.25 address.
+initialize_receive_link_context:
 	push hl			;7cdf
 	ld hl,0801ah		;7ce0
 	set 7,(hl)		;7ce3
 	res 6,(hl)		;7ce5
 	set 5,(hl)		;7ce7
 	ld a,(08820h)		;7ce9
-	call sub_112bh		;7cec
+	call select_channel_context		;7cec
 	push iy		;7cef
 	pop hl			;7cf1
 	ld de,block_0000_start		;7cf2
@@ -24916,7 +24447,8 @@ block_0214_start:
 	ld (hl),000h		;7d01
 	pop hl			;7d03
 	ret			;7d04
-sub_7d05h:
+reset_receive_address_state:
+; Resets receive address parsing and state flags.
 	ld hl,08ffch		;7d05
 	ld (08833h),hl		;7d08
 	push iy		;7d0b
@@ -24935,10 +24467,10 @@ sub_7d05h:
 	ret nz			;7d28
 	set 7,(hl)		;7d29
 	ret			;7d2b
-block_0214_end:
+block_0172_end:
 
-; BLOCK 'block_0215' (start 0x7d2c end 0x8000)
-block_0215_start:
+; BLOCK 'block_0173' (start 0x7d2c end 0x8000)
+block_0173_start:
 	defb 0ffh		;7d2c
 	defb 0ffh		;7d2d
 	defb 0ffh		;7d2e
