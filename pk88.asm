@@ -13,14 +13,14 @@ SCC_B_CTRL: equ 0f2h ; Z8530 channel B control/status (terminal serial)
 SCC_B_DATA: equ 0f3h ; Z8530 channel B data
 LED_LATCH:  equ 0f4h ; Octal D-latch driving front-panel indicator LEDs (active-low)
 ; LED_LATCH bit assignments (LSB to MSB, active-low):
-;   bit 0: CONV  - converse mode / packet data activity
-;   bit 1: TRANS - transmit / packet TX
-;   bit 2: CMD   - command mode active
-;   bit 3: SEND  - send buffer / TX data pending
-;   bit 4: DCD   - data carrier detect (modem)
-;   bit 5: STA   - station / link status
-;   bit 6: CON   - connect / connected state
-;   bit 7: MULT  - multiple connections / multi-link
+;   bit 0: CONV  - System is in Converse Mode
+;   bit 1: TRANS - System is in Transparent Mode
+;   bit 2: CMD   - System is in Command Mode
+;   bit 3: SEND  - Transmitter Push-to-Talk line is enabled
+;   bit 4: DCD   - Data Carrier Detect
+;   bit 5: STA   - Packet frame(s) unacknowledged
+;   bit 6: CON   - Packet link is in connected state
+;   bit 7: MULT  - Multiple Connection in progress
 
 	org	00000h
 
