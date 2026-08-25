@@ -1,0 +1,4 @@
+build/
+pk88.raw.asm
+*.gpr.lock
+*.rep/idata/~index.dat
