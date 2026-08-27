@@ -22,6 +22,149 @@ LED_LATCH:  equ 0f4h ; Octal D-latch driving front-panel indicator LEDs (active-
 ;   bit 6: CON   - Packet link is in connected state
 ;   bit 7: MULT  - Multiple Connection in progress
 
+; ============================================================
+; SRAM (0x8000-0xFFFF) equates — battery-backed settings & state
+; ============================================================
+
+; --- Checksum & validation ---
+BBRAM_CHKSUM:      equ 0881dh ; Battery settings checksum (1 byte)
+ROM_CHKSUM:        equ 08825h ; ROM checksum (1 byte)
+
+; --- Global config flags (0x8000-0x802A) ---
+CFG_FLAGS0:        equ 08000h ; Byte 0: channel enables, etc.
+CFG_FLAGS1:        equ 08001h ; Byte 1
+CFG_FLAGS2:        equ 08002h ; Byte 2
+CFG_FLAGS3:        equ 08003h ; Byte 3
+CFG_FLAGS4:        equ 08004h ; Byte 4
+CFG_FLAGS5:        equ 08005h ; Byte 5: active channel / state
+CFG_FLAGS6:        equ 08006h ; Byte 6: LED/status mirror
+CFG_FLAGS7:        equ 08007h ; Byte 7
+CFG_FLAGS8:        equ 08008h ; Byte 8: terminal mode/echo
+CFG_FLAGS9:        equ 08009h ; Byte 9
+CFG_FLAGSA:        equ 0800ah ; Byte 10
+CFG_FLAGSB:        equ 0800bh ; Byte 11
+CFG_FLAGSC:        equ 0800ch ; Byte 12: bbRAM scan status
+CFG_FLAGSD:        equ 0800dh ; Byte 13
+CFG_FLAGSE:        equ 0800eh ; Byte 14
+CFG_FLAGS10:       equ 0800fh ; Byte 15
+CFG_FLAGS11:       equ 08010h ; Byte 16: input control seq state
+CFG_FLAGS12:       equ 08011h ; Byte 17
+CFG_FLAGS13:       equ 08012h ; Byte 18
+CFG_FLAGS14:       equ 08013h ; Byte 18: deferred work flag
+CFG_FLAGS15:       equ 08014h ; Byte 20
+CFG_FLAGS16:       equ 08015h ; Byte 21
+CFG_FLAGS17:       equ 08016h ; Byte 22
+CFG_FLAGS18:       equ 08017h ; Byte 23
+CFG_FLAGS19:       equ 08018h ; Byte 24
+CFG_FLAGS1A:       equ 08019h ; Byte 25: TX/retry state
+CFG_FLAGS1B:       equ 0801ah ; Byte 26: mailbox session flag
+CFG_FLAGS1C:       equ 0801bh ; Byte 27
+CFG_FLAGS1D:       equ 0801ch ; Byte 28: mailbox/connection status
+CFG_FLAGS1E:       equ 0801dh ; Byte 29
+CFG_FLAGS1F:       equ 0801eh ; Byte 30
+CFG_FLAGS20:       equ 0801fh ; Byte 31
+
+; --- Persistent settings area (checksummed: 0x802B-0x83D4) ---
+SETTINGS_START:    equ 0802bh
+SETTINGS_END:      equ 083d4h
+SETTINGS_SIZE:     equ 0aa04h ; 43,524 bytes
+
+; --- Known persistent settings (offsets from SETTINGS_START) ---
+MYCALL_ADDR:       equ SETTINGS_START+0000h ; 6 bytes + SSID
+PACLEN_ADDR:       equ SETTINGS_START+0007h ; 1 byte
+TXDELAY_ADDR:      equ SETTINGS_START+0008h ; 1 byte
+PERSIST_ADDR:      equ SETTINGS_START+0009h ; 1 byte
+SLOTTIME_ADDR:     equ SETTINGS_START+000ah ; 1 byte
+DWAIT_ADDR:        equ SETTINGS_START+000bh ; 1 byte
+FRACK_ADDR:        equ SETTINGS_START+000ch ; 1 byte
+RETRY_ADDR:        equ SETTINGS_START+000dh ; 1 byte
+MAXFRAME_ADDR:     equ SETTINGS_START+000eh ; 1 byte
+CHECK_ADDR:        equ SETTINGS_START+000fh ; 1 byte
+AUTOLF_ADDR:       equ SETTINGS_START+0010h ; 1 byte
+LFPACK_ADDR:       equ SETTINGS_START+0011h ; 1 byte
+CRPACK_ADDR:       equ SETTINGS_START+0012h ; 1 byte
+ECHO_ADDR:         equ SETTINGS_START+0013h ; 1 byte
+XFLOW_ADDR:        equ SETTINGS_START+0014h ; 1 byte
+HBAUD_ADDR:        equ SETTINGS_START+0015h ; 2 bytes
+VHF_ADDR:          equ SETTINGS_START+0017h ; 1 byte
+AWLEN_ADDR:        equ SETTINGS_START+0018h ; 1 byte
+PARITY_ADDR:       equ SETTINGS_START+0019h ; 1 byte
+STOP_ADDR:         equ SETTINGS_START+001ah ; 1 byte
+MONITOR_ADDR:      equ SETTINGS_START+001bh ; 1 byte
+MFROM_ADDR:        equ SETTINGS_START+001ch ; 1 byte
+MTO_ADDR:          equ SETTINGS_START+001dh ; 1 byte
+MCON_ADDR:         equ SETTINGS_START+001eh ; 1 byte
+MSTAMP_ADDR:       equ SETTINGS_START+001fh ; 1 byte
+DAYSTAMP_ADDR:     equ SETTINGS_START+0020h ; 1 byte
+CONSTAMP_ADDR:     equ SETTINGS_START+0021h ; 1 byte
+MHEARD_ADDR:       equ SETTINGS_START+0022h ; 1 byte
+MFILTER_ADDR:      equ SETTINGS_START+0023h ; 1 byte
+BEACON_ADDR:       equ SETTINGS_START+0024h ; 1 byte
+BTEXT_ADDR:        equ SETTINGS_START+0025h ; 80 bytes
+CSTATUS_ADDR:      equ SETTINGS_START+0075h ; 1 byte
+CMSG_ADDR:         equ SETTINGS_START+0076h ; 80 bytes
+MYPBBS_ADDR:       equ SETTINGS_START+00c5h ; 6 bytes
+HOMEBBS_ADDR:      equ SETTINGS_START+00cbh ; 6 bytes
+MYALIAS_ADDR:      equ SETTINGS_START+00d1h ; 6 bytes
+MDIGI_ADDR:        equ SETTINGS_START+00d7h ; 6 bytes
+USERS_ADDR:        equ SETTINGS_START+00ddh ; 1 byte
+MAILDROP_ADDR:     equ SETTINGS_START+00deh ; 1 byte
+MDPROMPT_ADDR:     equ SETTINGS_START+00dfh ; 1 byte
+MFROM_NONE_ADDR:   equ SETTINGS_START+00e0h ; 1 byte
+CONMODE_ADDR:      equ SETTINGS_START+00e1h ; 1 byte
+TRANS_ADDR:        equ SETTINGS_START+00e2h ; 1 byte
+CONVERSE_ADDR:     equ SETTINGS_START+00e3h ; 1 byte
+DISPLAY_ADDR:      equ SETTINGS_START+00e4h ; 1 byte
+CALIBRATE_ADDR:    equ SETTINGS_START+00e5h ; 1 byte
+MHEARD_CMD_ADDR:   equ SETTINGS_START+00e6h ; 1 byte
+CSTATUS_CMD_ADDR:  equ SETTINGS_START+00e7h ; 1 byte
+RESTART_ADDR:      equ SETTINGS_START+00e8h ; 1 byte
+RESET_ADDR:        equ SETTINGS_START+00e9h ; 1 byte
+MDCHECK_ADDR:      equ SETTINGS_START+00eah ; 1 byte
+TCLEAR_ADDR:       equ SETTINGS_START+00ebh ; 1 byte
+KISS_ADDR:         equ SETTINGS_START+00ech ; 1 byte
+HOST_ADDR:         equ SETTINGS_START+00edh ; 1 byte
+HPOLL_ADDR:        equ SETTINGS_START+00eeh ; 1 byte
+IO_ADDR:           equ SETTINGS_START+00efh ; 1 byte
+KISSADDR_ADDR:     equ SETTINGS_START+00f0h ; 6 bytes
+RAWHDLC_ADDR:      equ SETTINGS_START+00f6h ; 1 byte
+; ... (many more settings through 0x83D4)
+
+; --- Mailbox & message storage (0x83D5+) ---
+MBOX_START:        equ 083d5h
+MBOX_PROMPT:       equ 08383h ; "Subject:/Enter message..."
+WELCOME_MSG:       equ 08212h ; "Welcome to my AEA PK-88 maildrop..."
+
+; --- Queue descriptors & runtime structures ---
+QUEUE_BASE:        equ 08fcch
+RX_QUEUE:          equ 08fd8h
+TX_QUEUE:          equ 08fd4h
+FREE_QUEUE:        equ 08fcch
+MON_QUEUE:         equ 08fd0h
+MAILBOX_QUEUE:     equ 08fech
+SERVICE_QUEUE:     equ 08ff0h
+QUEUE_RD_PTR:      equ 08ff6h
+QUEUE_WR_PTR:      equ 08ff4h
+CMD_QUEUE_RD:      equ 08ff8h
+CMD_QUEUE_WR:      equ 08ffah
+
+; --- Channel context block (per-channel, 0x40 bytes each) ---
+CHAN_BASE:         equ 083a5h ; 10 channels × 0x40 bytes
+CHAN_SIZE:         equ 0040h
+
+; --- Other runtime vars ---
+SCRAMBLER_STATE:   equ 088dfh
+TNC2_COMPAT:       equ 088e1h
+RTC_SECONDS:       equ 088e3h
+RTC_MINUTES:       equ 088e4h
+RTC_HOURS:         equ 088e5h
+
+; --- Default block pointers in ROM ---
+DEFAULT_BLOCK1:    equ l0110h ; 0xE8 bytes -> 0x8000
+DEFAULT_BLOCK2:    equ l01f8h ; ~0xD5 bytes -> 0x83D5
+DEFAULT_BLOCK3:    equ block_0012_end ; 0x33 bytes -> 0x8212
+DEFAULT_BLOCK4:    equ l02d3h ; 0x32 bytes -> 0x8383 (mail prompt)
+
 	org	00000h
 
 
