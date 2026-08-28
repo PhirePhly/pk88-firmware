@@ -130,6 +130,10 @@ KISSADDR_ADDR:     equ SETTINGS_START+00f0h ; 6 bytes
 RAWHDLC_ADDR:      equ SETTINGS_START+00f6h ; 1 byte
 ; ... (many more settings through 0x83D4)
 
+
+STATUS_D5:	equ	80d5h ; Status flags at 80d5
+STATUS_D6:	equ	80d6h ; Status flags at 80d6
+FLAG_AD:	equ	80adh ; Config flag AD
 ; --- Mailbox & message storage (0x83D5+) ---
 MBOX_START:        equ 083d5h
 MBOX_PROMPT:       equ 08383h ; "Subject:/Enter message..."
@@ -159,6 +163,24 @@ RTC_SECONDS:       equ 088e3h
 RTC_MINUTES:       equ 088e4h
 RTC_HOURS:         equ 088e5h
 
+
+CHAN_CTX_PTR:	equ	883fh ; Channel context pointer
+TX_BUFFER_IDX:	equ	888dh ; TX buffer index
+CHKSUM_TEMP:	equ	8828h ; Checksum temporary
+TX_STATE:	equ	8845h ; TX state machine
+CMD_BUF_PTR:	equ	89f7h ; Command buffer pointer
+RX_HEAD:	equ	88cfh ; RX queue head
+CONFIG_END:	equ	8841h ; Config area end pointer
+TIMING_BUF:	equ	882ah ; Timing buffer
+ROM_CHKSUM_CALC:	equ	8824h ; Calculated ROM checksum
+TX_TIMER:	equ	88b7h ; TX timer
+RX_TIMER:	equ	88b9h ; RX timer
+CHKSUM_ACC:	equ	8820h ; Checksum accumulator
+BUF_PTR:	equ	8854h ; Buffer pointer
+QUEUE_WR:	equ	889dh ; Queue write pointer
+BUF_FF:	equ	8ffeh ; Buffer at FFFE
+RX_BUF_PTR:	equ	8891h ; RX buffer pointer
+TX_CTR:	equ	884dh ; TX counter
 ; --- Default block pointers in ROM ---
 DEFAULT_BLOCK1:    equ l0110h ; 0xE8 bytes -> 0x8000
 DEFAULT_BLOCK2:    equ l01f8h ; ~0xD5 bytes -> 0x83D5
