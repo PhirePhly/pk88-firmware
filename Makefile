@@ -15,16 +15,7 @@ $(OUTPUT): $(ASM) | $(BUILD_DIR)
 
 verify: $(OUTPUT)
 	@echo "Verifying rebuild against original..."
-	@expected="$$(printf '%s  %s\n' '$(ORIGINAL_SHA256)' '$(OUTPUT)')"
-	@actual="$$(sha256sum '$(OUTPUT)')"
-	@if [ "$$expected" = "$$actual" ]; then \
-		echo "OK: $(OUTPUT) matches original (byte-for-byte)"; \
-	else \
-		echo "MISMATCH!"; \
-		echo "  expected: $$expected"; \
-		echo "  actual:   $$actual"; \
-		exit 1; \
-	fi
+	@echo '$(ORIGINAL_SHA256)  $(OUTPUT)' | sha256sum -c - && echo "OK: $(OUTPUT) is byte-for-byte identical to the original"
 
 clean:
 	rm -rf $(BUILD_DIR)

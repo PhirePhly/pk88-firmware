@@ -1163,7 +1163,7 @@ initialize_ram_and_persistent_state:
 	call verify_battery_settings_checksum		;03b1
 	jr nz,l03c4h		;03b4
 	ld c,000h		;03b6
-	push bc			;03b8
+	push bc		;03b8
 	call sub_193ch		;03b9
 	call c,sub_18fdh		;03bc
 	ld bc,l0029h+2		;03bf
@@ -1175,11 +1175,11 @@ l03c4h:
 	ld (08199h),a		;03cc
 	ld hl,l02d3h		;03cf
 	ld de,08383h		;03d2
-	ld bc,block_0004_end		;03d5
+	ld bc,0032h		;03d5  ; DEFAULT_BLOCK4: 0x32 bytes (mail prompt)
 	ldir		;03d8
 	ld hl,block_0012_end		;03da
 	ld de,08212h		;03dd
-	ld bc,l0033h		;03e0
+	ld bc,0033h		;03e0  ; DEFAULT_BLOCK3: 0x33 bytes (welcome msg)
 	ldir		;03e3
 	ld hl,l00ffh		;03e5
 	ld (0828bh),hl		;03e8
@@ -1193,8 +1193,8 @@ l03c4h:
 	ld a,0ffh		;0400
 	ld (08820h),a		;0402
 	ld c,0ffh		;0405
-	push bc			;0407
-	ld bc,l00e8h		;0408
+	push bc		;0407
+	ld bc,00e8h		;0408  ; DEFAULT_BLOCK1: 0xE8 bytes -> 0x8000
 l040bh:
 	ld hl,l0110h		;040b
 	ld de,08000h		;040e
@@ -1300,12 +1300,12 @@ l04a1h:
 	ld (iy+066h),a		;04e6
 	ld (iy+067h),000h		;04e9
 	push iy		;04ed
-	pop hl			;04ef
-	ld bc,l0040h		;04f0
-	add hl,bc			;04f3
-	xor a			;04f4
-	ld bc,test_combined_io_status		;04f5
-	call fill_memory_bc_plus_one		;04f8
+	pop hl		;04ef
+	ld bc,0040h		;04f0
+	add hl,bc		;04f3
+	xor a		;04f4
+	ld bc,0018h		;04f5  ; 24 bytes (test_combined_io_status address = 0x0018)
+	call fill_memory_bc_plus_one	;04f8
 	ld hl,(0883fh)		;04fb
 	inc hl			;04fe
 	ld (0883fh),hl		;04ff
@@ -1337,10 +1337,10 @@ reset_and_main_loop:
 	ld a,0c1h		;0527
 	out (SCC_A_CTRL),a		;0529
 	ld sp,block_0000_start		;052b
-	call compute_rom_checksum		;052e
+	call compute_rom_checksum	;052e
 	ld hl,08826h		;0531
 	ld de,08827h		;0534
-	ld bc,l07a2h		;0537
+	ld bc,07a2h		;0537  ; 0x7A2 bytes: clear 0x8826..0x8FC8
 	ld (hl),000h		;053a
 	ldir		;053c
 	ld a,(l0037h)		;053e
@@ -4939,7 +4939,7 @@ list_initialize_empty:
 sub_18fdh:
 	ld hl,l0230h		;18fd
 	ld de,08fcch		;1900
-	ld bc,l0034h		;1903
+	ld bc,0034h		;1903  ; 52 bytes from vector table constant
 	ldir		;1906
 	ld hl,block_0000_start		;1908
 	ld (088cfh),hl		;190b
@@ -4963,11 +4963,11 @@ sub_1917h:
 sub_193ch:
 	ld hl,l0230h		;193c
 	ld de,08fcch		;193f
-	ld bc,shared_pop_hl_return		;1942
+	ld bc,0030h		;1942  ; shared_pop_hl_return = 0x0030, count = 48 bytes
 	ldir		;1945
 	ld hl,09001h		;1947
 	ld de,rst20_unused_unsafe		;194a
-	ld bc,l0360h		;194d
+	ld bc,0360h		;194d  ; 0x360 bytes: clear loop at 0x9001
 l1950h:
 	res 7,(hl)		;1950
 	add hl,de			;1952
@@ -4977,11 +4977,11 @@ l1950h:
 	jr nz,l1950h		;1956
 	ld hl,08ffch		;1958
 	call sub_198ah		;195b
-	ret c			;195e
+	ret c		;195e
 	ld hl,block_0000_start		;195f
 	ld (088cfh),hl		;1962
 	ld hl,09000h		;1965
-	ld bc,l0360h		;1968
+	ld bc,0360h		;1968  ; 0x360 bytes: high-bit scan of 0x9000
 l196bh:
 	push bc			;196b
 	inc hl			;196c
@@ -16287,13 +16287,13 @@ l4b1ch:
 l4b21h:
 	ld hl,(0882ah)		;4b21
 	ld de,l0011h		;4b24
-	add hl,de			;4b27
-	ex de,hl			;4b28
-	pop hl			;4b29
-	ld bc,block_0000_end		;4b2a
+	add hl,de		;4b27
+	ex de,hl		;4b28
+	pop hl		;4b29
+	ld bc,0006h		;4b2a  ; block_0000_end = 0x0006, count = 6 bytes
 	ldir		;4b2d
-	pop hl			;4b2f
-	ld bc,block_0000_end		;4b30
+	pop hl		;4b2f
+	ld bc,0006h		;4b30  ; block_0000_end = 0x0006, count = 6 bytes
 	ldir		;4b33
 	ld a,(08a8eh)		;4b35
 	or a			;4b38
@@ -17039,7 +17039,7 @@ block_0138_start:
 	res 7,(hl)		;4eee
 	jr nz,l4f41h		;4ef0
 	ld hl,08099h		;4ef2
-	ld bc,block_0001_end		;4ef5
+	ld bc,0008h		;4ef5  ; block_0001_end = 0x0008, count = 8 bytes
 	cpdr		;4ef8
 	ld b,a			;4efa
 	jr z,l4f1dh		;4efb
@@ -19167,23 +19167,23 @@ l5ad5h:
 	djnz l5ad5h		;5ad6
 	ex de,hl			;5ad8
 	add hl,de			;5ad9
-	ex de,hl			;5ada
-	pop bc			;5adb
+	ex de,hl		;5ada
+	pop bc		;5adb
 l5adch:
-	push bc			;5adc
-	ld bc,l000dh		;5add
+	push bc		;5adc
+	ld bc,000dh		;5add  ; 13 bytes per channel entry
 	lddr		;5ae0
-	pop bc			;5ae2
+	pop bc		;5ae2
 	djnz l5adch		;5ae3
 l5ae5h:
 	ld hl,088dfh		;5ae5
 	ld de,088ffh		;5ae8
-	ld bc,block_0000_end		;5aeb
+	ld bc,0006h		;5aeb  ; block_0000_end = 6 bytes
 	ldir		;5aee
-	pop hl			;5af0
-	push hl			;5af1
-	ld bc,l0007h		;5af2
-	add hl,bc			;5af5
+	pop hl		;5af0
+	push hl		;5af1
+	ld bc,0007h		;5af2  ; 7 bytes
+	add hl,bc		;5af5
 	ldir		;5af6
 	dec hl			;5af8
 	bit 0,(hl)		;5af9
@@ -21419,12 +21419,12 @@ sub_68e4h:
 	ld (08855h),de		;6909
 l690dh:
 	push iy		;690d
-	pop hl			;690f
+	pop hl		;690f
 	ld de,l000eh		;6910
-	add hl,de			;6913
-	ex de,hl			;6914
+	add hl,de		;6913
+	ex de,hl		;6914
 	ld hl,08855h		;6915
-	ld bc,l0003h+1		;6918
+	ld bc,0004h		;6918  ; l0003h+1 = 0x0004, count = 4 bytes
 	ldir		;691b
 	jp update_battery_settings_checksum		;691d
 sub_6920h:
@@ -21599,7 +21599,7 @@ l6a3ah:
 	djnz l6a37h		;6a3a
 	ld hl,0884eh		;6a3c
 	ld de,08847h		;6a3f
-	ld bc,l0007h		;6a42
+	ld bc,0007h		;6a42  ; 7 bytes
 	ldir		;6a45
 	ld hl,08019h		;6a47
 	bit 5,(hl)		;6a4a
@@ -21612,7 +21612,7 @@ l6a55h:
 	ld hl,08068h		;6a55
 l6a58h:
 	ld c,007h		;6a58
-	ldir		;6a5a
+	ldir		;6a5a  ; 7 bytes
 	dec de			;6a5c
 	ld hl,0884dh		;6a5d
 	res 0,(hl)		;6a60
