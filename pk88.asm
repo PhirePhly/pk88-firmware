@@ -876,231 +876,28 @@ str_02a0_welcome_to_my_aea:
 l02d3h:
 ; high-bit-terminated text, ends at 0x0304: Subject:/Enter message, ^Z (CTRL-Z) or /EX to end\r
 str_02d3_subject_enter_message_z:
-	defb 053h		;02d3
-	defb 075h		;02d4
-	defb 062h		;02d5
-	defb 06ah		;02d6
-	defb 065h		;02d7
-	defb 063h		;02d8
-	defb 074h		;02d9
-	defb 03ah		;02da
-	defb 02fh		;02db
+	defm "Subject:/"
 l02dch:
-	defb 045h		;02dc
-	defb 06eh		;02dd
-	defb 074h		;02de
-	defb 065h		;02df
-	defb 072h		;02e0
-	defb 020h		;02e1
-	defb 06dh		;02e2
-	defb 065h		;02e3
-	defb 073h		;02e4
-	defb 073h		;02e5
-	defb 061h		;02e6
-	defb 067h		;02e7
-	defb 065h		;02e8
-	defb 02ch		;02e9
-	defb 020h		;02ea
-	defb 05eh		;02eb
-	defb 05ah		;02ec
-	defb 020h		;02ed
-	defb 028h		;02ee
-	defb 043h		;02ef
-	defb 054h		;02f0
-	defb 052h		;02f1
-	defb 04ch		;02f2
-	defb 02dh		;02f3
-	defb 05ah		;02f4
-	defb 029h		;02f5
-	defb 020h		;02f6
-	defb 06fh		;02f7
-	defb 072h		;02f8
-	defb 020h		;02f9
-	defb 02fh		;02fa
-	defb 045h		;02fb
-	defb 058h		;02fc
-	defb 020h		;02fd
-	defb 074h		;02fe
-	defb 06fh		;02ff
-	defb 020h		;0300
-	defb 065h		;0301
+	defm "Enter message, ^Z (CTRL-Z) or /EX to e"
 l0302h:
-	defb 06eh		;0302
-	defb 064h		;0303
-	defb 08dh		;0304
+	defm "nd"
+	defb 8dh
 l0305h:
-	defb 00dh		;0305
-	defb 00dh		;0306
+	defm "\r\r"
 l0307h:
-	defb 00dh		;0307
-	defb 011h		;0308
+	defm "\r"
+	defb 11h
 ; high-bit-terminated text, ends at 0x0395: AEA PK-88 Packet Controller\rAX.25 Level 2 Version 2.0\rCopyright (C) 1986-1991 by\rAdvanced Electronic Applications, Inc.\rRelease 23.AUG.91 *\r\r
 str_0309_aea_pk_88_packet:
-	defb 041h		;0309
-	defb 045h		;030a
-	defb 041h		;030b
-	defb 020h		;030c
-	defb 050h		;030d
-	defb 04bh		;030e
-	defb 02dh		;030f
-	defb 038h		;0310
-	defb 038h		;0311
-	defb 020h		;0312
-	defb 050h		;0313
-	defb 061h		;0314
-	defb 063h		;0315
-	defb 06bh		;0316
-	defb 065h		;0317
-	defb 074h		;0318
-	defb 020h		;0319
-	defb 043h		;031a
-	defb 06fh		;031b
-	defb 06eh		;031c
-	defb 074h		;031d
-	defb 072h		;031e
-	defb 06fh		;031f
-	defb 06ch		;0320
-	defb 06ch		;0321
-	defb 065h		;0322
-	defb 072h		;0323
-	defb 00dh		;0324
-	defb 041h		;0325
-	defb 058h		;0326
-	defb 02eh		;0327
-	defb 032h		;0328
-	defb 035h		;0329
-	defb 020h		;032a
-	defb 04ch		;032b
-	defb 065h		;032c
-	defb 076h		;032d
-	defb 065h		;032e
-	defb 06ch		;032f
-	defb 020h		;0330
-	defb 032h		;0331
-	defb 020h		;0332
-	defb 056h		;0333
-	defb 065h		;0334
-	defb 072h		;0335
-	defb 073h		;0336
-	defb 069h		;0337
-	defb 06fh		;0338
-	defb 06eh		;0339
-	defb 020h		;033a
-	defb 032h		;033b
-	defb 02eh		;033c
-	defb 030h		;033d
-	defb 00dh		;033e
-	defb 043h		;033f
-	defb 06fh		;0340
-	defb 070h		;0341
-	defb 079h		;0342
-	defb 072h		;0343
-	defb 069h		;0344
-	defb 067h		;0345
-	defb 068h		;0346
-	defb 074h		;0347
-	defb 020h		;0348
-	defb 028h		;0349
-	defb 043h		;034a
-	defb 029h		;034b
-	defb 020h		;034c
-	defb 031h		;034d
-	defb 039h		;034e
-	defb 038h		;034f
-	defb 036h		;0350
-	defb 02dh		;0351
-	defb 031h		;0352
-	defb 039h		;0353
-	defb 039h		;0354
-	defb 031h		;0355
-	defb 020h		;0356
-	defb 062h		;0357
-	defb 079h		;0358
-	defb 00dh		;0359
-	defb 041h		;035a
-	defb 064h		;035b
-	defb 076h		;035c
-	defb 061h		;035d
-	defb 06eh		;035e
-	defb 063h		;035f
+	defm "AEA PK-88 Packet Controller\rAX.25 Level 2 Version 2.0\rCopyright (C) 1986-1991 by\rAdvanc"
 l0360h:
-	defb 065h		;0360
-	defb 064h		;0361
-	defb 020h		;0362
-	defb 045h		;0363
-	defb 06ch		;0364
-	defb 065h		;0365
-	defb 063h		;0366
-	defb 074h		;0367
-	defb 072h		;0368
-	defb 06fh		;0369
-	defb 06eh		;036a
-	defb 069h		;036b
-	defb 063h		;036c
-	defb 020h		;036d
-	defb 041h		;036e
-	defb 070h		;036f
-	defb 070h		;0370
-	defb 06ch		;0371
-	defb 069h		;0372
-	defb 063h		;0373
-	defb 061h		;0374
-	defb 074h		;0375
-	defb 069h		;0376
-	defb 06fh		;0377
-	defb 06eh		;0378
-	defb 073h		;0379
-	defb 02ch		;037a
-	defb 020h		;037b
-	defb 049h		;037c
-	defb 06eh		;037d
-	defb 063h		;037e
-	defb 02eh		;037f
-	defb 00dh		;0380
-	defb 052h		;0381
-	defb 065h		;0382
-	defb 06ch		;0383
-	defb 065h		;0384
-	defb 061h		;0385
-	defb 073h		;0386
-	defb 065h		;0387
-	defb 020h		;0388
-	defb 032h		;0389
-	defb 033h		;038a
-	defb 02eh		;038b
-	defb 041h		;038c
-	defb 055h		;038d
-	defb 047h		;038e
-	defb 02eh		;038f
-	defb 039h		;0390
-	defb 031h		;0391
-	defb 020h		;0392
-	defb 02ah		;0393
-	defb 00dh		;0394
-	defb 08dh		;0395
+	defm "ed Electronic Applications, Inc.\rRelease 23.AUG.91 *\r"
+	defb 8dh
 l0396h:
 ; high-bit-terminated text, ends at 0x03a9: ROM error, checksum 
 str_0396_rom_error_checksum:
-	defb 052h		;0396
-	defb 04fh		;0397
-	defb 04dh		;0398
-	defb 020h		;0399
-	defb 065h		;039a
-	defb 072h		;039b
-	defb 072h		;039c
-	defb 06fh		;039d
-	defb 072h		;039e
-	defb 02ch		;039f
-	defb 020h		;03a0
-	defb 063h		;03a1
-	defb 068h		;03a2
-	defb 065h		;03a3
-	defb 063h		;03a4
-	defb 06bh		;03a5
-	defb 073h		;03a6
-	defb 075h		;03a7
-	defb 06dh		;03a8
-	defb 0a0h		;03a9
+	defm "ROM error, checksum"
+	defb 0a0h
 block_0013_end:
 
 ; BLOCK 'block_0014' (start 0x03aa end 0x05ea)
@@ -5679,14 +5476,8 @@ str_1c2d_zafilter:
 	defb 080h		;1c3a
 ; high-bit-terminated text, ends at 0x1c42: IALFDisp
 str_1c3b_ialfdisp:
-	defb 049h		;1c3b
-	defb 041h		;1c3c
-	defb 04ch		;1c3d
-	defb 046h		;1c3e
-	defb 044h		;1c3f
-	defb 069h		;1c40
-	defb 073h		;1c41
-	defb 0f0h		;1c42
+	defm "IALFDi"
+	defb 73h, 70h | 80h
 	defb 000h		;1c43
 	defb 000h		;1c44
 	defb 020h		;1c45
