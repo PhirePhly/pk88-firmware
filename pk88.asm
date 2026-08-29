@@ -138,6 +138,7 @@ FLAG_AD:	equ	80adh ; Config flag AD
 MBOX_START:        equ 083d5h
 MBOX_PROMPT:       equ 08383h ; "Subject:/Enter message..."
 WELCOME_MSG:       equ 08212h ; "Welcome to my AEA PK-88 maildrop..."
+MBOX_CAPACITY:     equ 02a8h  ; 680 bytes max mailbox storage
 
 ; --- Queue descriptors & runtime structures ---
 QUEUE_BASE:        equ 08fcch
@@ -870,58 +871,8 @@ block_0012_end:
 block_0013_start:
 ; high-bit-terminated text, ends at 0x02d2: Welcome to my AEA PK-88 maildrop.\rType H for help.\r
 str_02a0_welcome_to_my_aea:
-	defb 057h		;02a0
-	defb 065h		;02a1
-	defb 06ch		;02a2
-	defb 063h		;02a3
-	defb 06fh		;02a4
-	defb 06dh		;02a5
-	defb 065h		;02a6
-	defb 020h		;02a7
-l02a8h:
-	defb 074h		;02a8
-	defb 06fh		;02a9
-	defb 020h		;02aa
-	defb 06dh		;02ab
-	defb 079h		;02ac
-	defb 020h		;02ad
-	defb 041h		;02ae
-	defb 045h		;02af
-	defb 041h		;02b0
-	defb 020h		;02b1
-	defb 050h		;02b2
-	defb 04bh		;02b3
-	defb 02dh		;02b4
-	defb 038h		;02b5
-	defb 038h		;02b6
-	defb 020h		;02b7
-	defb 06dh		;02b8
-	defb 061h		;02b9
-	defb 069h		;02ba
-	defb 06ch		;02bb
-	defb 064h		;02bc
-	defb 072h		;02bd
-	defb 06fh		;02be
-	defb 070h		;02bf
-	defb 02eh		;02c0
-	defb 00dh		;02c1
-	defb 054h		;02c2
-	defb 079h		;02c3
-	defb 070h		;02c4
-	defb 065h		;02c5
-	defb 020h		;02c6
-	defb 048h		;02c7
-	defb 020h		;02c8
-	defb 066h		;02c9
-	defb 06fh		;02ca
-	defb 072h		;02cb
-	defb 020h		;02cc
-	defb 068h		;02cd
-	defb 065h		;02ce
-	defb 06ch		;02cf
-	defb 070h		;02d0
-	defb 02eh		;02d1
-	defb 08dh		;02d2
+	defm "Welcome to my AEA PK-88 maildrop.",0dh
+	defm "Type H for help.",8dh
 l02d3h:
 ; high-bit-terminated text, ends at 0x0304: Subject:/Enter message, ^Z (CTRL-Z) or /EX to end\r
 str_02d3_subject_enter_message_z:
@@ -13433,7 +13384,7 @@ l3d78h:
 	ld (0882ch),hl		;3d7d
 	jr l3d58h		;3d80
 l3d82h:
-	ld hl,l02a8h		;3d82
+	ld hl,MBOX_CAPACITY		;3d82
 	ld de,(0882ch)		;3d85
 	and a			;3d89
 	sbc hl,de		;3d8a
