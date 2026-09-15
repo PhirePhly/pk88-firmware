@@ -1186,96 +1186,16 @@ block_0015_start:
 	defb 000h		;05ee
 ; high-bit-terminated text, ends at 0x0610: \r\r\rPK-88 is using default values.\r
 str_05ef_pk_88_is_using:
-	defb 00dh		;05ef
-	defb 00dh		;05f0
-	defb 00dh		;05f1
-	defb 050h		;05f2
-	defb 04bh		;05f3
-	defb 02dh		;05f4
-	defb 038h		;05f5
-	defb 038h		;05f6
-	defb 020h		;05f7
-	defb 069h		;05f8
-	defb 073h		;05f9
-	defb 020h		;05fa
-	defb 075h		;05fb
-	defb 073h		;05fc
-	defb 069h		;05fd
-	defb 06eh		;05fe
-	defb 067h		;05ff
-	defb 020h		;0600
-	defb 064h		;0601
-	defb 065h		;0602
-	defb 066h		;0603
-	defb 061h		;0604
-	defb 075h		;0605
-	defb 06ch		;0606
-	defb 074h		;0607
-	defb 020h		;0608
-	defb 076h		;0609
-	defb 061h		;060a
-	defb 06ch		;060b
-	defb 075h		;060c
-	defb 065h		;060d
-	defb 073h		;060e
-	defb 02eh		;060f
-	defb 08dh		;0610
+	defb 0dh, 0dh, 0dh
+	defm "PK-88 is using default values."
+	defb 08dh
 l0611h:
 ; high-bit-terminated text, ends at 0x0645: \r\nPlease type a star ( * ) for auto-baud routine.\r\n\r\n
 str_0611_please_type_a_star:
-	defb 00dh		;0611
-	defb 00ah		;0612
-	defb 050h		;0613
-	defb 06ch		;0614
-	defb 065h		;0615
-	defb 061h		;0616
-	defb 073h		;0617
-	defb 065h		;0618
-	defb 020h		;0619
-	defb 074h		;061a
-	defb 079h		;061b
-	defb 070h		;061c
-	defb 065h		;061d
-	defb 020h		;061e
-	defb 061h		;061f
-	defb 020h		;0620
-	defb 073h		;0621
-	defb 074h		;0622
-	defb 061h		;0623
-	defb 072h		;0624
-	defb 020h		;0625
-	defb 028h		;0626
-	defb 020h		;0627
-	defb 02ah		;0628
-	defb 020h		;0629
-	defb 029h		;062a
-	defb 020h		;062b
-	defb 066h		;062c
-	defb 06fh		;062d
-	defb 072h		;062e
-	defb 020h		;062f
-	defb 061h		;0630
-	defb 075h		;0631
-	defb 074h		;0632
-	defb 06fh		;0633
-	defb 02dh		;0634
-	defb 062h		;0635
-	defb 061h		;0636
-	defb 075h		;0637
-	defb 064h		;0638
-	defb 020h		;0639
-	defb 072h		;063a
-	defb 06fh		;063b
-	defb 075h		;063c
-	defb 074h		;063d
-	defb 069h		;063e
-	defb 06eh		;063f
-	defb 065h		;0640
-	defb 02eh		;0641
-	defb 00dh		;0642
-	defb 00ah		;0643
-	defb 00dh		;0644
-	defb 08ah		;0645
+	defb 0dh, 0ah
+	defm "Please type a star ( * ) for auto-baud routine."
+	defb 0dh, 0ah, 0dh
+	defb 08ah
 block_0015_end:
 
 ; BLOCK 'block_0016' (start 0x0646 end 0x077d)
@@ -1625,38 +1545,8 @@ block_0021_start:
 	defb 007h		;0827
 ; high-bit-terminated text, ends at 0x0847: bbRAM scanned, checksum failed!\r
 str_0828_bbram_scanned_checksum_failed:
-	defb 062h		;0828
-	defb 062h		;0829
-	defb 052h		;082a
-	defb 041h		;082b
-	defb 04dh		;082c
-	defb 020h		;082d
-	defb 073h		;082e
-	defb 063h		;082f
-	defb 061h		;0830
-	defb 06eh		;0831
-	defb 06eh		;0832
-	defb 065h		;0833
-	defb 064h		;0834
-	defb 02ch		;0835
-	defb 020h		;0836
-	defb 063h		;0837
-	defb 068h		;0838
-	defb 065h		;0839
-	defb 063h		;083a
-	defb 06bh		;083b
-	defb 073h		;083c
-	defb 075h		;083d
-	defb 06dh		;083e
-	defb 020h		;083f
-	defb 066h		;0840
-	defb 061h		;0841
-	defb 069h		;0842
-	defb 06ch		;0843
-	defb 065h		;0844
-	defb 064h		;0845
-	defb 021h		;0846
-	defb 08dh		;0847
+	defm "bbRAM scanned, checksum failed!"
+	defb 08dh
 block_0021_end:
 
 ; BLOCK 'block_0022' (start 0x0848 end 0x08f5)
@@ -2821,23 +2711,8 @@ block_0032_end:
 block_0033_start:
 ; high-bit-terminated text, ends at 0x0f90: ?channel must be 
 str_0f80_channel_must_be:
-	defb 03fh		;0f80
-	defb 063h		;0f81
-	defb 068h		;0f82
-	defb 061h		;0f83
-	defb 06eh		;0f84
-	defb 06eh		;0f85
-	defb 065h		;0f86
-	defb 06ch		;0f87
-	defb 020h		;0f88
-	defb 06dh		;0f89
-	defb 075h		;0f8a
-	defb 073h		;0f8b
-	defb 074h		;0f8c
-	defb 020h		;0f8d
-	defb 062h		;0f8e
-	defb 065h		;0f8f
-	defb 0a0h		;0f90
+	defm "?channel must be"
+	defb 0a0h
 l0f91h:
 	defb 030h		;0f91
 	defb 02dh		;0f92
@@ -3854,19 +3729,8 @@ block_0055_start:
 l14e2h:
 ; high-bit-terminated text, ends at 0x14ee: CONNECTED to 
 str_14e2_connected_to:
-	defb 043h		;14e2
-	defb 04fh		;14e3
-	defb 04eh		;14e4
-	defb 04eh		;14e5
-	defb 045h		;14e6
-	defb 043h		;14e7
-	defb 054h		;14e8
-	defb 045h		;14e9
-	defb 044h		;14ea
-	defb 020h		;14eb
-	defb 074h		;14ec
-	defb 06fh		;14ed
-	defb 0a0h		;14ee
+	defm "CONNECTED to"
+	defb 0a0h
 block_0055_end:
 
 ; BLOCK 'block_0056' (start 0x14ef end 0x164f)
