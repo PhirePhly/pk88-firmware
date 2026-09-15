@@ -4771,13 +4771,7 @@ str_1a32_gg:
 	defb 000h		;1a3a
 ; high-bit-terminated text, ends at 0x1a42: OConnect
 str_1a3b_oconnect:
-	defb 04fh		;1a3b
-	defb 043h		;1a3c
-	defb 06fh		;1a3d
-	defb 06eh		;1a3e
-	defb 06eh		;1a3f
-	defb 065h		;1a40
-	defb 063h		;1a41
+	defm "OConnec"
 	defb 0f4h		;1a42
 	defb 006h		;1a43
 	defb 003h		;1a44
@@ -4787,12 +4781,7 @@ str_1a3b_oconnect:
 	defb 080h		;1a48
 ; high-bit-terminated text, ends at 0x1a4f: POpmode
 str_1a49_popmode:
-	defb 050h		;1a49
-	defb 04fh		;1a4a
-	defb 070h		;1a4b
-	defb 06dh		;1a4c
-	defb 06fh		;1a4d
-	defb 064h		;1a4e
+	defm "POpmod"
 	defb 0e5h		;1a4f
 	defb 006h		;1a50
 	defb 001h		;1a51
@@ -4803,12 +4792,7 @@ str_1a49_popmode:
 	defb 000h		;1a56
 ; high-bit-terminated text, ends at 0x1a5d: CStatus
 str_1a57_cstatus:
-	defb 043h		;1a57
-	defb 053h		;1a58
-	defb 074h		;1a59
-	defb 061h		;1a5a
-	defb 074h		;1a5b
-	defb 075h		;1a5c
+	defm "CStatu"
 	defb 0f3h		;1a5d
 	defb 006h		;1a5e
 	defb 001h		;1a5f
@@ -4819,13 +4803,7 @@ str_1a57_cstatus:
 	defb 000h		;1a64
 ; high-bit-terminated text, ends at 0x1a6c: CALibrat
 str_1a65_calibrat:
-	defb 043h		;1a65
-	defb 041h		;1a66
-	defb 04ch		;1a67
-	defb 069h		;1a68
-	defb 062h		;1a69
-	defb 072h		;1a6a
-	defb 061h		;1a6b
+	defm "CALibra"
 	defb 0f4h		;1a6c
 	defb 006h		;1a6d
 	defb 001h		;1a6e
@@ -4836,13 +4814,7 @@ str_1a65_calibrat:
 	defb 000h		;1a73
 ; high-bit-terminated text, ends at 0x1a7b: CONVerse
 str_1a74_converse:
-	defb 043h		;1a74
-	defb 04fh		;1a75
-	defb 04eh		;1a76
-	defb 056h		;1a77
-	defb 065h		;1a78
-	defb 072h		;1a79
-	defb 073h		;1a7a
+	defm "CONVers"
 	defb 0e5h		;1a7b
 	defb 006h		;1a7c
 	defb 001h		;1a7d
@@ -4852,14 +4824,7 @@ str_1a74_converse:
 	defb 000h		;1a81
 ; high-bit-terminated text, ends at 0x1a8a: IDisconne
 str_1a82_idisconne:
-	defb 049h		;1a82
-	defb 044h		;1a83
-	defb 069h		;1a84
-	defb 073h		;1a85
-	defb 063h		;1a86
-	defb 06fh		;1a87
-	defb 06eh		;1a88
-	defb 06eh		;1a89
+	defm "IDisconn"
 	defb 0e5h		;1a8a
 	defb 006h		;1a8b
 	defb 001h		;1a8c
@@ -4869,13 +4834,7 @@ str_1a82_idisconne:
 	defb 000h		;1a90
 ; high-bit-terminated text, ends at 0x1a98: ADAytime
 str_1a91_adaytime:
-	defb 041h		;1a91
-	defb 044h		;1a92
-	defb 041h		;1a93
-	defb 079h		;1a94
-	defb 074h		;1a95
-	defb 069h		;1a96
-	defb 06dh		;1a97
+	defm "ADAytim"
 	defb 0e5h		;1a98
 	defb 006h		;1a99
 	defb 001h		;1a9a
